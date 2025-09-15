@@ -1,0 +1,15 @@
+# Confirm/adjust these to valid Yahoo Finance tickers before enabling real data
+# Lines starting with # are ignored
+ATYR
+CMPS
+MBOT
+NOVO-B.CO
+OTLK
+PESI
+SPCM
+APLD
+CAPR
+CRBP
+FBIO
+KALA
+

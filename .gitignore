@@ -1,0 +1,19 @@
+# Python
+scripts/.venv/
+__pycache__/
+*.pyc
+
+# Node/Next.js
+web/node_modules/
+web/.next/
+web/out/
+web/.turbo/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
