@@ -248,7 +248,7 @@ export default function TickerClient({ id }: { id: string }) {
   const fmtPercent = (ratio?: number | null) => (ratio == null ? '--' : `${(ratio * 100).toFixed(2)}%`)
   const fmtPercentDirect = (n?: number | null) => (n == null ? '--' : `${n.toFixed(2)}%`)
 
-  const flags = useMemo(() => (data?.flags ?? []), [data])
+  const flags = useMemo(() => (data?.flags ?? []).filter(f => !String(f).includes('_fail')), [data])
   const F: any = (data as any)?.fundamentals || {}
   const T: any = (data as any)?.technicals || {}
   const S: any = (data as any)?.sentiment || {}
@@ -298,7 +298,7 @@ export default function TickerClient({ id }: { id: string }) {
           <small style={{color:'#666'}}>Data refresh: {timeAgo(meta?.generated_at)}{metaCached ? ' (cache)' : ''}</small>
         </div>
         <div style={{display:'flex', gap:8}}>{/* Actions */}
-          <a href="/" style={{textDecoration:'none'}}>&larr; Back</a>
+          <a href={`${BASE}/`} style={{textDecoration:'none'}}>&larr; Back</a>
           <button onClick={() => fetchTicker({ force: true })} disabled={loading} style={btn}>{loading ? 'Refreshing...' : 'Refresh'}</button>
           <button onClick={() => addToPortfolio(id, (data as any)?.price)} style={btn}>Add to portfolio</button>
         </div>

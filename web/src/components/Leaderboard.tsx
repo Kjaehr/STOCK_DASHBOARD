@@ -188,7 +188,7 @@ export default function Leaderboard() {
               <td style={td}>{row.fund_points ?? 0}</td>
               <td style={td}>{row.tech_points ?? 0}</td>
               <td style={td}>{row.sent_points ?? 0}</td>
-              <td style={td}><small>{(row.flags||[]).join(', ')}</small></td>
+              <td style={td}><small>{(() => { const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail')); return shown.length?shown.join(', '):'—' })()}</small></td>
               <td style={td}>
                 <a href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
                 {' '}
