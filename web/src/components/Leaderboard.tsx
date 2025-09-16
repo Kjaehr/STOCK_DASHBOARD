@@ -141,6 +141,8 @@ export default function Leaderboard() {
     } catch (e) {
       console.error('portfolio save failed', e)
     }
+  }
+
   function openGithubIssueFor(action: 'ADD'|'REMOVE', symbol: string) {
     const t = (symbol || '').trim()
     if (!t) { alert('Enter a ticker symbol'); return }
