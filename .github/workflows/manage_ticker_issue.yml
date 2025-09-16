@@ -1,0 +1,132 @@
+name: Manage Ticker via Issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse issue command
+        id: parse
+        run: |
+          set -euo pipefail
+          title='${{ github.event.issue.title }}'
+          body='${{ github.event.issue.body }}'
+          echo "Title: $title"
+          # Expected formats: "[ADD] AAPL" or "[REMOVE] AAPL" (case-insensitive)
+          lower=$(printf '%s' "$title" | tr 'A-Z' 'a-z')
+          action=""
+          symbol=""
+          if printf '%s' "$lower" | grep -q '^\[add\]\s\+'; then
+            action="add"
+            symbol=$(printf '%s' "$title" | sed -E 's/^\[[Aa][Dd][Dd]\]\s+//')
+          elif printf '%s' "$lower" | grep -q '^\[remove\]\s\+'; then
+            action="remove"
+            symbol=$(printf '%s' "$title" | sed -E 's/^\[[Rr][Ee][Mm][Oo][Vv][Ee]\]\s+//')
+          fi
+          symbol=$(printf '%s' "$symbol" | tr -d '\r' | sed -e 's/^\s*//' -e 's/\s*$//')
+          if [ -z "$action" ] || [ -z "$symbol" ]; then
+            echo "Unrecognized format. Use '[ADD] TICKER' or '[REMOVE] TICKER' in the issue title." >&2
+            echo "action=invalid" >> $GITHUB_OUTPUT
+            echo "symbol=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "action=$action" >> $GITHUB_OUTPUT
+          echo "symbol=$symbol" >> $GITHUB_OUTPUT
+
+      - name: Comment invalid usage
+        if: steps.parse.outputs.action == 'invalid'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            Could not parse command. Please title the issue as:
+            - [ADD] TICKER
+            - [REMOVE] TICKER
+
+      - name: Setup Python
+        if: steps.parse.outputs.action != 'invalid'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        if: steps.parse.outputs.action != 'invalid'
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas feedparser vaderSentiment
+
+      - name: Apply change (add/remove)
+        if: steps.parse.outputs.action != 'invalid'
+        run: |
+          set -euo pipefail
+          sym='${{ steps.parse.outputs.symbol }}'
+          act='${{ steps.parse.outputs.action }}'
+          echo "Action: $act, Symbol: $sym"
+          mkdir -p scripts data
+          if [ ! -f scripts/tickers.txt ]; then : > scripts/tickers.txt; fi
+          if [ "$act" = "add" ]; then
+            if ! grep -i -Fxq "$sym" scripts/tickers.txt; then echo "$sym" >> scripts/tickers.txt; fi
+          else
+            tmpfile=$(mktemp)
+            grep -vi -Fx "$sym" scripts/tickers.txt > "$tmpfile" || true
+            mv "$tmpfile" scripts/tickers.txt
+            key="${sym// /_}.json"; rm -f "data/$key" || true
+          fi
+
+      - name: Rebuild data
+        if: steps.parse.outputs.action != 'invalid'
+        run: |
+          python scripts/fetch_compute.py
+
+      - name: Cleanup stray data files not in tickers list
+        if: steps.parse.outputs.action != 'invalid'
+        run: |
+          set -euo pipefail
+          if [ -f scripts/tickers.txt ]; then
+            mapfile -t TICKERS < <(grep -v '^#' scripts/tickers.txt | sed '/^\s*$/d')
+          else
+            TICKERS=()
+          fi
+          ALLOWED=("meta.json")
+          for t in "${TICKERS[@]}"; do
+            key="${t// /_}.json"; ALLOWED+=("$key"); done
+          shopt -s nullglob
+          for f in data/*.json; do
+            base="$(basename "$f")"; keep=false
+            for a in "${ALLOWED[@]}"; do [ "$base" = "$a" ] && keep=true && break; done
+            [ "$keep" = true ] || { echo "Removing stray $f"; rm -f "$f"; }
+          done
+
+      - name: Commit & push changes
+        if: steps.parse.outputs.action != 'invalid'
+        run: |
+          git config user.name "auto-bot"
+          git config user.email "auto@users.noreply.github.com"
+          git add scripts/tickers.txt data/*.json || true
+          git commit -m "ci(issue): ${{ steps.parse.outputs.action }} ${{ steps.parse.outputs.symbol }} and rebuild data" || echo "No changes to commit"
+          git push
+
+      - name: Comment result and close
+        if: steps.parse.outputs.action != 'invalid'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            ✅ Processed `${{ steps.parse.outputs.action }}` for `${{ steps.parse.outputs.symbol }}`. A Pages deploy will follow shortly.
+      
+      - name: Close issue
+        if: steps.parse.outputs.action != 'invalid'
+        uses: actions-ecosystem/action-close-issue@v1
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          comment: "Closed by automation."
+

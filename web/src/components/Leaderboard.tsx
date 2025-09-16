@@ -47,6 +47,7 @@ export default function Leaderboard() {
   const [onlyPriced, setOnlyPriced] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
+  const [newTicker, setNewTicker] = useState('')
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -140,7 +141,15 @@ export default function Leaderboard() {
     } catch (e) {
       console.error('portfolio save failed', e)
     }
+  function openGithubIssueFor(action: 'ADD'|'REMOVE', symbol: string) {
+    const t = (symbol || '').trim()
+    if (!t) { alert('Enter a ticker symbol'); return }
+    const title = `[${action}] ${t}`
+    const body = 'Requested from dashboard UI'
+    const url = `https://github.com/Kjaehr/STOCK_DASHBOARD/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`
+    if (typeof window !== 'undefined') window.open(url, '_blank', 'noopener,noreferrer')
   }
+
 
   return (
     <section>
@@ -159,6 +168,11 @@ export default function Leaderboard() {
           <input type="checkbox" checked={onlyPriced} onChange={e=>setOnlyPriced(e.target.checked)} />
           Only with price
         </label>
+        <span style={{marginLeft:8, opacity:0.5}}>|</span>
+        <input placeholder="Add/remove ticker (e.g. AAPL or NOVO-B.CO)" value={newTicker} onChange={e=>setNewTicker(e.target.value)} style={{padding:'8px', border:'1px solid #ddd'}} />
+        <button onClick={()=>openGithubIssueFor('ADD', newTicker)} style={btnMini} title="Trigger GitHub Action via Issue">Add ticker</button>
+        <button onClick={()=>openGithubIssueFor('REMOVE', newTicker)} style={btnMini} title="Trigger GitHub Action via Issue">Remove ticker</button>
+
       </div>
       {error ? <div style={alertWarn}>{error}</div> : null}
       <table style={{width:'100%', borderCollapse:'collapse', marginTop:12}}>{/* Table */}
