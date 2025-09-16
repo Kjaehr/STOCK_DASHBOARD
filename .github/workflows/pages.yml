@@ -29,11 +29,16 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci
-      - name: Build and export static site
+      - name: Build static site (Next.js export)
         run: |
           npm run export
         env:
           NEXT_PUBLIC_BASE_PATH: /STOCK_DASHBOARD
+      - name: Verify export produced index.html
+        run: |
+          ls -la
+          ls -la out || true
+          test -f out/index.html || { echo "ERROR: out/index.html missing"; exit 1; }
       - name: Copy data into export
         run: |
           mkdir -p out/data

@@ -8,8 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "export": "next build && next export",
-    "export:local": "next build && next export && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
+    "export": "next build",
+    "export:local": "next build && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
   },
   "dependencies": {
     "chart.js": "^4.5.0",
