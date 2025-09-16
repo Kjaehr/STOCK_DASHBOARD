@@ -1,0 +1,105 @@
+name: Remove Ticker
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Ticker symbol to remove (e.g. AAPL, NOVO-B.CO)"
+        required: true
+        type: string
+
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Remove symbol from scripts/tickers.txt
+        id: remove_symbol
+        run: |
+          set -euo pipefail
+          sym="${{ inputs.symbol }}"
+          sym="$(printf "%s" "$sym" | tr -d '\r' | sed -e 's/^\s*//' -e 's/\s*$//')"
+          if [ -z "$sym" ]; then
+            echo "Symbol is empty" >&2
+            exit 1
+          fi
+          echo "Requested removal: '$sym'"
+          if [ ! -f scripts/tickers.txt ]; then
+            echo "scripts/tickers.txt does not exist; nothing to remove"
+            echo "removed=false" >> $GITHUB_OUTPUT
+          else
+            tmpfile="$(mktemp)"
+            # Case-insensitive exact-line remove
+            grep -vi -Fx "$sym" scripts/tickers.txt > "$tmpfile" || true
+            if cmp -s scripts/tickers.txt "$tmpfile"; then
+              echo "Symbol not found in scripts/tickers.txt"
+              echo "removed=false" >> $GITHUB_OUTPUT
+            else
+              mv "$tmpfile" scripts/tickers.txt
+              echo "Removed from scripts/tickers.txt"
+              echo "removed=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas feedparser vaderSentiment
+
+      - name: Remove data file for this ticker (best-effort)
+        run: |
+          set -euo pipefail
+          key="${{ inputs.symbol }}"
+          key="${key// /_}.json"
+          if [ -f "data/$key" ]; then
+            echo "Removing data/$key"
+            rm -f "data/$key"
+          else
+            echo "data/$key not found; will cleanup after rebuild"
+          fi
+
+      - name: Rebuild data for remaining tickers
+        run: |
+          python scripts/fetch_compute.py
+
+      - name: Cleanup stray data files not in tickers list
+        run: |
+          set -euo pipefail
+          if [ -f scripts/tickers.txt ]; then
+            mapfile -t TICKERS < <(grep -v '^#' scripts/tickers.txt | sed '/^\s*$/d')
+          else
+            TICKERS=()
+          fi
+          ALLOWED=("meta.json")
+          for t in "${TICKERS[@]}"; do
+            key="${t// /_}.json"
+            ALLOWED+=("$key")
+          done
+          shopt -s nullglob
+          for f in data/*.json; do
+            base="$(basename "$f")"
+            skip=false
+            for a in "${ALLOWED[@]}"; do
+              if [ "$base" = "$a" ]; then skip=true; break; fi
+            done
+            if [ "$skip" = false ]; then
+              echo "Removing stray data file: $f"
+              rm -f "$f"
+            fi
+          done
+
+      - name: Commit & push changes
+        run: |
+          git config user.name "auto-bot"
+          git config user.email "auto@users.noreply.github.com"
+          git add scripts/tickers.txt data/*.json || true
+          git commit -m "ci(remove_ticker): remove ${{ inputs.symbol }} and rebuild data" || echo "No changes to commit"
+          git push
+
