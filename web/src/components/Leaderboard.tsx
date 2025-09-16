@@ -190,7 +190,7 @@ export default function Leaderboard() {
               <td style={td}>{row.sent_points ?? 0}</td>
               <td style={td}><small>{(row.flags||[]).join(', ')}</small></td>
               <td style={td}>
-                <a href={`/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
+                <a href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
                 {' '}
                 <button onClick={()=>addToPortfolio(row.ticker, row.price)} style={btnMini}>Add</button>
               </td>

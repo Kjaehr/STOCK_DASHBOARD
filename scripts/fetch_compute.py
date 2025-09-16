@@ -297,200 +297,149 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     }, flags
 
 def fetch_news_sentiment(label: str, symbol: str) -> dict:
-
+    """Fetch news headlines for the last 7/30 days and compute a simple sentiment score.
+    Be robust to missing fields and never raise – return a neutral payload on any error.
+    """
     if feedparser is None or SentimentIntensityAnalyzer is None:
+        # Dependencies missing – return neutral payload (caller will still score it)
+        return {
+            "points": 0,
+            "mean7": None,
+            "count7": 0,
+            "count30": 0,
+            "flow": "low",
+            "signal_terms": False,
+            "buckets": {"sent": "none"},
+        }
 
-        raise RuntimeError("feedparser/vaderSentiment not installed; run: pip install feedparser vaderSentiment")
+    try:
+        # Query: prefer symbol, fallback to label. Build encoded Google News query
+        from urllib.parse import urlencode
+        params = {
+            "q": f"{symbol} stock OR {label} stock",
+            "hl": "en-US",
+            "gl": "US",
+            "ceid": "US:en",
+        }
+        url = "https://news.google.com/rss/search?" + urlencode(params)
 
+        d = feedparser.parse(url)
 
+        from time import mktime
+        import datetime as dt
 
-    # Query: prefer symbol, fallback to label.
+        now = dt.datetime.now(dt.timezone.utc)
+        d7 = now - dt.timedelta(days=7)
+        d30 = now - dt.timedelta(days=30)
 
-    # Build a safe, encoded Google News query
+        titles_7: list[str] = []
+        titles_30: list[str] = []
 
-    from urllib.parse import urlencode
-
-    q = f"{symbol} stock OR {label} stock"
-
-    params = {"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}
-
-    url = "https://news.google.com/rss/search?" + urlencode(params)
-
-    d = feedparser.parse(url)
-
-
-
-    from time import mktime
-
-    import datetime as dt
-
-
-
-    now = dt.datetime.now(dt.timezone.utc)
-
-    d7 = now - dt.timedelta(days=7)
-
-    d30 = now - dt.timedelta(days=30)
-
-
-
-    titles_7: list[str] = []
-
-    titles_30: list[str] = []
-
-
-
-    for e in d.entries or []:
-
-        title_raw = e.get("title", "")
-        if isinstance(title_raw, list):
-            # Join list of fragments safely
-            title = " ".join(str(t) for t in title_raw).strip()
-        else:
-            title = str(title_raw or "").strip()
-
-        if not title:
-            continue
-
-        try:
-
-            published = e.get("published_parsed")
-
-            if not published or not isinstance(published, (tuple, time.struct_time)):
-
+        entries = getattr(d, "entries", None) or []
+        for e in entries:
+            # title can be str or list fragments
+            title_raw = e.get("title", "") if hasattr(e, "get") else getattr(e, "title", "")
+            if isinstance(title_raw, list):
+                title = " ".join(str(t) for t in title_raw).strip()
+            else:
+                title = str(title_raw or "").strip()
+            if not title:
                 continue
 
-            pdt = dt.datetime.fromtimestamp(mktime(published))
+            # published_parsed can be None/missing or different name; try a few
+            published = None
+            if hasattr(e, "get"):
+                published = e.get("published_parsed") or e.get("updated_parsed") or e.get("created_parsed")
+            else:
+                published = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None) or getattr(e, "created_parsed", None)
 
-        except Exception:
+            try:
+                if not published or not isinstance(published, (tuple, time.struct_time)):
+                    continue
+                pdt = dt.datetime.fromtimestamp(mktime(published))
+            except Exception:
+                continue
 
-            continue
+            if pdt >= d30:
+                titles_30.append(title)
+            if pdt >= d7:
+                titles_7.append(title)
 
-        if pdt >= d30:
+        analyzer = SentimentIntensityAnalyzer()
 
-            titles_30.append(title)
+        def mean_comp(titles: list[str]) -> Optional[float]:
+            if not titles:
+                return None
+            vals = []
+            for t in titles:
+                try:
+                    vals.append(float(analyzer.polarity_scores(t).get("compound", 0.0)))
+                except Exception:
+                    continue
+            return (sum(vals) / len(vals)) if vals else None
 
-        if pdt >= d7:
+        sent7 = mean_comp(titles_7)
+        count7 = len(titles_7)
+        count30 = len(titles_30)
+        avg7 = (count30 / 30.0) * 7.0 if count30 else 0.0
 
-            titles_7.append(title)
-
-
-
-    analyzer = SentimentIntensityAnalyzer()
-
-    def mean_comp(titles: list[str]) -> Optional[float]:
-
-        if not titles:
-
-            return None
-
-        vals = [analyzer.polarity_scores(t)["compound"] for t in titles]
-
-        return sum(vals) / len(vals) if vals else None
-
-
-
-    sent7 = mean_comp(titles_7)
-
-    count7 = len(titles_7)
-
-    count30 = len(titles_30)
-
-    avg7 = (count30 / 30.0) * 7.0 if count30 else 0.0
-
-
-
-    # flow intensity
-
-    if avg7 <= 0.0:
-
-        flow_points = 0
-
-        flow = "low"
-
-    else:
-
-        ratio = count7 / avg7
-
-        if ratio >= 1.4:
-
-            flow_points = 6
-
-            flow = "high"
-
-        elif ratio >= 0.7:
-
-            flow_points = 3
-
-            flow = "neutral"
-
-        else:
-
+        # flow intensity
+        if avg7 <= 0.0:
             flow_points = 0
-
             flow = "low"
+        else:
+            ratio = count7 / avg7
+            if ratio >= 1.4:
+                flow_points = 6
+                flow = "high"
+            elif ratio >= 0.7:
+                flow_points = 3
+                flow = "neutral"
+            else:
+                flow_points = 0
+                flow = "low"
 
+        # headline sentiment points
+        if sent7 is None:
+            sent_points = 0
+            sent_bucket = "none"
+        elif sent7 > 0.2:
+            sent_points = 15
+            sent_bucket = ">0.2"
+        elif sent7 >= 0.0:
+            sent_points = 8
+            sent_bucket = "0-0.2"
+        else:
+            sent_points = 0
+            sent_bucket = "<0"
 
+        # signal terms
+        terms = ["contract award", "guidance raise", "insider buying"]
+        has_signal = any(any(term in t.lower() for term in terms) for t in titles_30)
+        signal_points = 4 if has_signal else 0
 
-    # headline sentiment points
+        total_points = sent_points + flow_points + signal_points
 
-    if sent7 is None:
-
-        sent_points = 0
-
-        sent_bucket = "none"
-
-    elif sent7 > 0.2:
-
-        sent_points = 15
-
-        sent_bucket = ">0.2"
-
-    elif sent7 >= 0.0:
-
-        sent_points = 8
-
-        sent_bucket = "0-0.2"
-
-    else:
-
-        sent_points = 0
-
-        sent_bucket = "<0"
-
-
-
-    # signal terms
-
-    terms = ["contract award", "guidance raise", "insider buying"]
-
-    has_signal = any(any(term in t.lower() for term in terms) for t in titles_30)
-
-    signal_points = 4 if has_signal else 0
-
-
-
-    total_points = sent_points + flow_points + signal_points
-
-
-
-    return {
-
-        "points": total_points,
-
-        "mean7": sent7,
-
-        "count7": count7,
-
-        "count30": count30,
-
-        "flow": flow,
-
-        "signal_terms": has_signal,
-
-        "buckets": {"sent": sent_bucket},
-
-    }
+        return {
+            "points": total_points,
+            "mean7": sent7,
+            "count7": count7,
+            "count30": count30,
+            "flow": flow,
+            "signal_terms": has_signal,
+            "buckets": {"sent": sent_bucket},
+        }
+    except Exception as _e:
+        # On any unexpected error, return a neutral payload instead of raising
+        return {
+            "points": 0,
+            "mean7": None,
+            "count7": 0,
+            "count30": 0,
+            "flow": "low",
+            "signal_terms": False,
+            "buckets": {"sent": "none"},
+        }
 
 
 
