@@ -1,13 +1,10 @@
 "use client"
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'next/navigation'
 import type { StockData, StockMeta } from '../../../types'
 import { PriceChart, LineChart } from '../../../components/Charts'
 import { BASE } from '../../../base'
 
-export default function TickerPage() {
-  const params = useParams<{ id: string }>()
-  const id = decodeURIComponent(params.id)
+export default function TickerClient({ id }: { id: string }) {
   const [data, setData] = useState<StockData | null>(null)
   const [meta, setMeta] = useState<StockMeta | null>(null)
   const [range, setRange] = useState<'1M'|'3M'|'6M'|'1Y'>('3M')
@@ -218,7 +215,6 @@ function timeAgo(iso?: string) {
   const days = Math.floor(hrs / 24)
   return `${days}d ago`
 }
-
 
 const btn: React.CSSProperties = { padding:'6px 10px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer' }
 const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fff', cursor:'pointer', borderRadius:6 }

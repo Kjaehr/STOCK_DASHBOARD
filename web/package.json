@@ -3,12 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "dev": "next dev",
+    "prepare:dev-data": "node -e \"const fs=require('fs'),p=require('path');const src=p.resolve('..','data');const dst=p.resolve('public','data');fs.mkdirSync('public',{recursive:true});fs.cpSync(src,dst,{recursive:true});console.log('Copied',src,'->',dst);\"",
+    "dev": "npm run prepare:dev-data && next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "export": "next build && next export",
-    "export:local": "next build && next export && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
+    "export": "next build",
+    "export:local": "next build && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
   },
   "dependencies": {
     "chart.js": "^4.5.0",
