@@ -17,3 +17,17 @@ Thumbs.db
 .vscode/
 .idea/
 
+
+# Local venv at repo root
+.venv/
+
+# Root-level node modules (if accidentally installed at repo root)
+node_modules/
+
+# Next.js dev artifacts inside web/
+web/public/data/
+web/var/
+
+# Env files
+.env
+.env.*

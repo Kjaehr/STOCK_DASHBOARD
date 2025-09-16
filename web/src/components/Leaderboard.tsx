@@ -63,7 +63,9 @@ export default function Leaderboard() {
     if (!force) {
       if (cachedMeta) setMeta(cachedMeta.payload)
       if (cachedList) setItems(cachedList.payload)
-      if (cachedMeta && cachedList && isFresh(cachedMeta) && isFresh(cachedList)) {
+      const expectedTickers = cachedMeta?.payload?.tickers?.length ?? 0
+      const cachedCount = cachedList && Array.isArray(cachedList.payload) ? cachedList.payload.length : 0
+      if (cachedMeta && cachedList && isFresh(cachedMeta) && isFresh(cachedList) && cachedCount > 0 && (expectedTickers === 0 ? cachedCount > 1 : cachedCount >= expectedTickers)) {
         setUsingCache(true)
         return
       }

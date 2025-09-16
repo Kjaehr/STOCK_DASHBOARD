@@ -21,14 +21,16 @@ export async function generateStaticParams() {
   return tickers.map(t => ({ id: encodeURIComponent(t) }))
 }
 
-export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
-  const decoded = decodeURIComponent(params.id)
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
+  const { id } = await params
+  const decoded = decodeURIComponent(id)
   return {
     title: `${decoded} - Stock Dashboard`,
   }
 }
 
-export default function Page({ params }: { params: { id: string } }) {
-  const id = decodeURIComponent(params.id)
-  return <TickerClient id={id} />
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const decoded = decodeURIComponent(id)
+  return <TickerClient id={decoded} />
 }
