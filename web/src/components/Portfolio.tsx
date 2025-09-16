@@ -1,6 +1,7 @@
 "use client"
 import { useEffect, useMemo, useState } from 'react'
 import type { StockMeta, StockData } from '../types'
+import { BASE } from '../base'
 
 type Holding = { ticker: string; qty: number; avgCost: number }
 
@@ -10,6 +11,9 @@ export default function Portfolio() {
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [meta, setMeta] = useState<StockMeta | null>(null)
   const [dataMap, setDataMap] = useState<Record<string, StockData>>({})
+
+  const [loading, setLoading] = useState(false)
+  const [refreshTick, setRefreshTick] = useState(0)
 
   // load holdings
   useEffect(() => {
@@ -28,31 +32,36 @@ export default function Portfolio() {
   useEffect(() => {
     const run = async () => {
       try {
-        const m = await fetch('/data/meta.json').then(r => r.json()) as StockMeta
+        setLoading(true)
+        const m = await fetch(`${BASE}/data/meta.json`).then(r => r.json()) as StockMeta
         setMeta(m)
         const wanted = Array.from(new Set(holdings.map(h => h.ticker)))
-        const results = await Promise.allSettled(wanted.map(t => fetch(`/data/${t.replace(/\s+/g,'_')}.json`).then(r => r.json())))
+        const results = await Promise.allSettled(wanted.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => r.json())))
         const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
         const map: Record<string, StockData> = {}
         for (const s of ok) map[s.ticker] = s
         setDataMap(map)
       } catch (e) {
         console.error('Failed to load data', e)
+      } finally {
+        setLoading(false)
       }
     }
     if (holdings.length) run()
-  }, [holdings])
+  }, [holdings, refreshTick])
 
   const [form, setForm] = useState<Holding>({ ticker: '', qty: 0, avgCost: 0 })
 
   const rows = useMemo(() => {
     return holdings.map(h => {
       const s = dataMap[h.ticker]
-      const price = s?.price ?? null
+      const marketPrice = s?.price ?? null
+      const price = marketPrice ?? (h.avgCost ?? null)
+      const priceFallback = marketPrice == null && price != null
       const value = price != null ? price * h.qty : null
       const gain = price != null ? (price - h.avgCost) * h.qty : null
       const gainPct = price != null && h.avgCost ? ((price - h.avgCost) / h.avgCost) * 100 : null
-      return { ...h, price, value, gain, gainPct, score: s?.score ?? null }
+      return { ...h, price, priceFallback, value, gain, gainPct, score: s?.score ?? null }
     })
   }, [holdings, dataMap])
 
@@ -122,6 +131,8 @@ export default function Portfolio() {
         </div>
         <button onClick={addHolding} style={btn}>Add/Update</button>
         <input type="file" accept="application/json" onChange={onImport} />
+        <button onClick={()=>setRefreshTick(x=>x+1)} disabled={loading} style={btn}>{loading ? 'Refreshing…' : 'Refresh data'}</button>
+
         <button onClick={onExport} style={btn}>Export JSON</button>
       </div>
 
@@ -149,7 +160,7 @@ export default function Portfolio() {
               <td style={td}>{r.ticker}</td>
               <td style={td}>{num(r.qty)}</td>
               <td style={td}>{fmt(r.avgCost)}</td>
-              <td style={td}>{fmt(r.price)}</td>
+              <td style={td}>{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</td>
               <td style={td}>{fmt(r.value)}</td>
               <td style={{...td, color: (r.gain ?? 0) >= 0 ? 'green' : 'crimson'}}>{fmt(r.gain)}</td>
               <td style={td}>{pct(r.gainPct)}</td>

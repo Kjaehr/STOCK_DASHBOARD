@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 {"generated_at":"2025-09-16T04:31:58Z","tickers":["ATYR","CMPS","MBOT","NOVO-B.CO","OTLK","PESI","SPCM","APLD","CAPR","CRBP","FBIO","KALA"]}
+=======
+{"generated_at":"2025-09-16T07:55:16Z","tickers":["ATYR","CMPS","MBOT","NOVO-B.CO","OTLK","PESI","SPCB","APLD","CAPR","CRBP","FBIO","KALA"]}
+>>>>>>> a803409 (Web: static export for GH Pages (basePath), remove /data route, use BASE for fetches, presets on Leaderboard, Pages workflow; add export:local script)

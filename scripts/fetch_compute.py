@@ -19,6 +19,35 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime, timezone
+import certifi
+
+# Ensure TLS CA bundle for curl_cffi/requests on Windows/OneDrive paths
+# Copy certifi CA to an ASCII-only path to avoid libcurl issues with non-ASCII user profiles
+import os as _os_for_ca
+
+def _ensure_ascii_ca_bundle() -> None:
+    try:
+        _src = certifi.where()
+        _ca_path = _src
+        if _os_for_ca.name == 'nt':
+            _target_dir = r"C:\Users\Public\stockdash-cert"
+            _target_file = _target_dir + r"\cacert.pem"
+            try:
+                _os_for_ca.makedirs(_target_dir, exist_ok=True)
+                import shutil as _sh
+                _sh.copyfile(_src, _target_file)
+                _ca_path = _target_file
+            except Exception:
+                _ca_path = _src
+        # Set env for requests, curl_cffi, and OpenSSL consumers within this process
+        _os_for_ca.environ["SSL_CERT_FILE"] = _ca_path
+        _os_for_ca.environ["CURL_CA_BUNDLE"] = _ca_path
+        _os_for_ca.environ["REQUESTS_CA_BUNDLE"] = _ca_path
+    except Exception:
+        # Best-effort; let downstream libs decide defaults
+        pass
+
+_ensure_ascii_ca_bundle()
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -118,6 +147,7 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
             "atr_pct": None,
             "vol20_rising": False,
             "price_gt_ma20": False,
+            "series": {"dates": [], "close": [], "sma50": [], "sma200": [], "rsi": [], "atr_pct": []},
         }, flags
 
     close = hist["Close"].astype(float)
@@ -172,6 +202,36 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     if len(ma20) and pd.notna(ma20.iloc[-1]):
         price_gt_ma20 = bool(close.iloc[-1] > ma20.iloc[-1])
 
+    # Build compact series for charts (last ~120 points)
+    try:
+        series_tail = 120
+        df = close.to_frame("close").join([
+            sma50.rename("sma50"),
+            sma200.rename("sma200"),
+            rsi.rename("rsi"),
+            atr_pct.rename("atr_pct"),
+        ])
+        df = df.tail(series_tail)
+        dates = [idx.strftime("%Y-%m-%d") for idx in df.index]
+        def to_list(col):
+            vals = []
+            for x in df[col].tolist():
+                try:
+                    vals.append(float(x) if x is not None and not pd.isna(x) else None)
+                except Exception:
+                    vals.append(None)
+            return vals
+        series = {
+            "dates": dates,
+            "close": to_list("close"),
+            "sma50": to_list("sma50"),
+            "sma200": to_list("sma200"),
+            "rsi": to_list("rsi"),
+            "atr_pct": to_list("atr_pct"),
+        }
+    except Exception:
+        series = {"dates": [], "close": [], "sma50": [], "sma200": [], "rsi": [], "atr_pct": []}
+
     return {
         "price": price,
         "sma50": sma50_last,
@@ -180,6 +240,7 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
         "atr_pct": atrpct_last,
         "vol20_rising": vol20_rising,
         "price_gt_ma20": price_gt_ma20,
+        "series": series,
     }, flags
 
 
@@ -188,8 +249,11 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
         raise RuntimeError("feedparser/vaderSentiment not installed; run: pip install feedparser vaderSentiment")
 
     # Query: prefer symbol, fallback to label.
-    q = f"{symbol} stock OR \"{label}\" stock"
-    url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    # Build a safe, encoded Google News query
+    from urllib.parse import urlencode
+    q = f"{symbol} stock OR {label} stock"
+    params = {"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+    url = "https://news.google.com/rss/search?" + urlencode(params)
     d = feedparser.parse(url)
 
     from time import mktime
@@ -435,6 +499,7 @@ def score_technicals(t: dict) -> Tuple[int, dict]:
         "rsi": rsi,
         "atr_pct": atr_pct,
         "vol_confirm": {"rising20": bool(vol20_rising), "price_gt_ma20": bool(price_gt_ma20)},
+        "series": t.get("series"),
     }
 
     return int(points), details
@@ -465,7 +530,9 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
     except Exception as e:
         flags.append(f"indicators_fail:{e.__class__.__name__}")
         tech = {"price": None, "sma50": None, "sma200": None, "rsi": None, "atr_pct": None,
-                "vol20_rising": False, "price_gt_ma20": False}
+                "vol20_rising": False, "price_gt_ma20": False,
+                "series": {"dates": [], "close": [], "sma50": [], "sma200": [], "rsi": [], "atr_pct": []}
+               }
 
     # Sentiment
     try:

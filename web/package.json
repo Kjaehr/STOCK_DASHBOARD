@@ -7,11 +7,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "export": "next build && next export"
+    "export": "next build && next export",
+    "export:local": "next build && next export && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
   },
   "dependencies": {
+    "chart.js": "^4.5.0",
     "next": "latest",
     "react": "latest",
+    "react-chartjs-2": "^5.3.0",
     "react-dom": "latest"
   },
   "devDependencies": {
@@ -20,4 +23,3 @@
     "typescript": "latest"
   }
 }
-
