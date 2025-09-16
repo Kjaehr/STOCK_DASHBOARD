@@ -6,6 +6,67 @@ import { BASE } from '../base'
 type Holding = { ticker: string; qty: number; avgCost: number }
 
 const LS_KEY = 'portfolio'
+const FILE_ACCEPT = '.json,.csv,application/json,text/csv'
+
+function normalizeHolding(input: Partial<Holding>): Holding | null {
+  if (!input.ticker) return null
+  const ticker = String(input.ticker).trim().toUpperCase()
+  if (!ticker) return null
+  const qty = Number((input as any).qty)
+  const avgCost = Number((input as any).avgCost)
+  if (!Number.isFinite(qty) || !Number.isFinite(avgCost)) return null
+  return { ticker, qty, avgCost }
+}
+
+function parseCsv(text: string): Holding[] {
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (!lines.length) return []
+  let startIndex = 0
+  let tickerIndex = 0
+  let qtyIndex = 1
+  let costIndex = 2
+  const first = lines[0].split(',').map(v => v.trim().toLowerCase())
+  if (first.some(cell => cell.includes('ticker') || cell.includes('symbol'))) {
+    const find = (...keys: string[]) => first.findIndex(cell => keys.includes(cell))
+    const ti = find('ticker', 'symbol')
+    const qi = find('qty', 'quantity', 'shares')
+    const ci = find('avg_cost', 'avgcost', 'avg price', 'average_cost', 'averagecost', 'price')
+    tickerIndex = ti >= 0 ? ti : tickerIndex
+    qtyIndex = qi >= 0 ? qi : qtyIndex
+    costIndex = ci >= 0 ? ci : costIndex
+    startIndex = 1
+  }
+  const out: Holding[] = []
+  for (let i = startIndex; i < lines.length; i += 1) {
+    const parts = lines[i].split(',').map(v => v.trim())
+    if (!parts.length) continue
+    const ticker = parts[tickerIndex]?.toUpperCase()
+    if (!ticker) continue
+    const qtyRaw = parts[qtyIndex]?.replace(/,/g, '')
+    const costRaw = parts[costIndex]?.replace(/,/g, '')
+    const qty = Number(qtyRaw)
+    const avgCost = Number(costRaw)
+    if (!Number.isFinite(qty) || !Number.isFinite(avgCost)) continue
+    out.push({ ticker, qty, avgCost })
+  }
+  return out
+}
+
+function toCsv(rows: Holding[]): string {
+  const header = 'ticker,qty,avg_cost'
+  const body = rows.map(r => `${r.ticker},${r.qty},${r.avgCost}`)
+  return [header, ...body].join('\n')
+}
+
+function downloadFile(contents: string, filename: string, mime: string) {
+  const blob = new Blob([contents], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 export default function Portfolio() {
   const [holdings, setHoldings] = useState<Holding[]>([])
@@ -15,7 +76,6 @@ export default function Portfolio() {
   const [loading, setLoading] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
 
-  // load holdings
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY)
@@ -23,12 +83,10 @@ export default function Portfolio() {
     } catch {}
   }, [])
 
-  // persist holdings
   useEffect(() => {
     try { localStorage.setItem(LS_KEY, JSON.stringify(holdings)) } catch {}
   }, [holdings])
 
-  // load latest prices for tickers present in holdings
   useEffect(() => {
     const run = async () => {
       try {
@@ -76,8 +134,9 @@ export default function Portfolio() {
     setHoldings(prev => {
       const next = [...prev]
       const ix = next.findIndex(x => x.ticker === t)
-      if (ix >= 0) next[ix] = { ticker: t, qty: form.qty, avgCost: form.avgCost }
-      else next.push({ ticker: t, qty: form.qty, avgCost: form.avgCost })
+      const record: Holding = { ticker: t, qty: form.qty, avgCost: form.avgCost }
+      if (ix >= 0) next[ix] = record
+      else next.push(record)
       return next
     })
     setForm({ ticker: '', qty: 0, avgCost: 0 })
@@ -90,24 +149,33 @@ export default function Portfolio() {
   function onImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
+    const isCsv = file.name.toLowerCase().endsWith('.csv') || file.type.includes('csv')
     const fr = new FileReader()
     fr.onload = () => {
       try {
-        const arr = JSON.parse(String(fr.result)) as Holding[]
-        if (Array.isArray(arr)) setHoldings(arr)
-      } catch {}
+        let parsed: Holding[] = []
+        if (isCsv) {
+          parsed = parseCsv(String(fr.result ?? ''))
+        } else {
+          const raw = JSON.parse(String(fr.result ?? '')) as Array<Partial<Holding>>
+          parsed = (raw || []).map(x => normalizeHolding(x)).filter(Boolean) as Holding[]
+        }
+        if (parsed.length) setHoldings(parsed)
+      } catch (err) {
+        console.error('Import failed', err)
+        alert('Failed to import portfolio file. Use CSV with ticker,qty,avg_cost or JSON array.')
+      }
     }
     fr.readAsText(file)
+    e.target.value = ''
   }
 
-  function onExport() {
-    const blob = new Blob([JSON.stringify(holdings, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'portfolio.json'
-    a.click()
-    URL.revokeObjectURL(url)
+  function onExportJson() {
+    downloadFile(JSON.stringify(holdings, null, 2), 'portfolio.json', 'application/json')
+  }
+
+  function onExportCsv() {
+    downloadFile(toCsv(holdings), 'portfolio.csv', 'text/csv')
   }
 
   return (
@@ -130,10 +198,10 @@ export default function Portfolio() {
           </label>
         </div>
         <button onClick={addHolding} style={btn}>Add/Update</button>
-        <input type="file" accept="application/json" onChange={onImport} />
-        <button onClick={()=>setRefreshTick(x=>x+1)} disabled={loading} style={btn}>{loading ? 'Refreshing…' : 'Refresh data'}</button>
-
-        <button onClick={onExport} style={btn}>Export JSON</button>
+        <input type="file" accept={FILE_ACCEPT} onChange={onImport} />
+        <button onClick={()=>setRefreshTick(x=>x+1)} disabled={loading || !holdings.length} style={btn}>{loading ? 'Refreshing...' : 'Refresh data'}</button>
+        <button onClick={onExportJson} style={btn}>Export JSON</button>
+        <button onClick={onExportCsv} style={btn}>Export CSV</button>
       </div>
 
       <div style={{marginTop:12}}>
@@ -164,7 +232,7 @@ export default function Portfolio() {
               <td style={td}>{fmt(r.value)}</td>
               <td style={{...td, color: (r.gain ?? 0) >= 0 ? 'green' : 'crimson'}}>{fmt(r.gain)}</td>
               <td style={td}>{pct(r.gainPct)}</td>
-              <td style={{...td, color: scoreColor(r.score ?? 0)}}>{r.score ?? '—'}</td>
+              <td style={{...td, color: scoreColor(r.score ?? 0)}}>{r.score ?? '--'}</td>
               <td style={td}><button onClick={()=>removeHolding(r.ticker)} style={btn}>Remove</button></td>
             </tr>
           ))}
@@ -180,15 +248,15 @@ const th: React.CSSProperties = { textAlign:'left', borderBottom:'1px solid #eee
 const td: React.CSSProperties = { borderBottom:'1px solid #f2f2f2', padding:'8px' }
 
 function fmt(n?: number | null) {
-  if (n == null) return '—'
+  if (n == null) return '--'
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n)
 }
 function num(n?: number | null) {
-  if (n == null) return '—'
+  if (n == null) return '--'
   return new Intl.NumberFormat().format(n)
 }
 function pct(n?: number | null) {
-  if (n == null) return '—'
+  if (n == null) return '--'
   return `${n.toFixed(2)}%`
 }
 function scoreColor(v: number) {
@@ -196,4 +264,3 @@ function scoreColor(v: number) {
   if (v >= 50) return 'orange'
   return 'crimson'
 }
-

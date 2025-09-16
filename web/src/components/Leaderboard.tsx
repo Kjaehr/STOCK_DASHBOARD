@@ -3,6 +3,41 @@ import { useEffect, useMemo, useState } from 'react'
 import type { StockMeta, StockData } from '../types'
 import { BASE } from '../base'
 
+const META_CACHE_KEY = 'stockdash:meta'
+const LIST_CACHE_KEY = 'stockdash:leaderboard'
+const TICKER_CACHE_PREFIX = 'stockdash:ticker:'
+const CACHE_TTL_MS = 10 * 60 * 1000
+
+type CacheRecord<T> = {
+  ts: number
+  payload: T
+}
+
+function readCache<T>(key: string): CacheRecord<T> | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return null
+    return JSON.parse(raw) as CacheRecord<T>
+  } catch {
+    return null
+  }
+}
+
+function writeCache<T>(key: string, payload: T) {
+  if (typeof window === 'undefined') return
+  try {
+    const record: CacheRecord<T> = { ts: Date.now(), payload }
+    window.localStorage.setItem(key, JSON.stringify(record))
+  } catch (e) {
+    console.warn('cache write failed', e)
+  }
+}
+
+function isFresh(record: CacheRecord<unknown> | null) {
+  return !!record && Date.now() - record.ts <= CACHE_TTL_MS
+}
+
 export default function Leaderboard() {
   const [meta, setMeta] = useState<StockMeta | null>(null)
   const [items, setItems] = useState<StockData[]>([])
@@ -10,27 +45,55 @@ export default function Leaderboard() {
   const [loading, setLoading] = useState(false)
   const [preset, setPreset] = useState<'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'>('NONE')
   const [onlyPriced, setOnlyPriced] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [usingCache, setUsingCache] = useState(false)
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const cachedMeta = readCache<StockMeta>(META_CACHE_KEY)
+    if (cachedMeta) setMeta(cachedMeta.payload)
+    const cachedList = readCache<StockData[]>(LIST_CACHE_KEY)
+    if (cachedList) setItems(cachedList.payload)
+    fetchAll()
+  }, [])
 
-  async function fetchAll() {
+  async function fetchAll(force = false) {
+    const cachedMeta = readCache<StockMeta>(META_CACHE_KEY)
+    const cachedList = readCache<StockData[]>(LIST_CACHE_KEY)
+    if (!force) {
+      if (cachedMeta) setMeta(cachedMeta.payload)
+      if (cachedList) setItems(cachedList.payload)
+      if (cachedMeta && cachedList && isFresh(cachedMeta) && isFresh(cachedList)) {
+        setUsingCache(true)
+        return
+      }
+    }
     try {
       setLoading(true)
-      const m = await fetch(`${BASE}/data/meta.json`).then(r => r.json()) as StockMeta
-      setMeta(m)
-      const list = (m.tickers ?? [])
+      setError(null)
+      const metaJson = await fetch(`${BASE}/data/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
+      setMeta(metaJson)
+      writeCache(META_CACHE_KEY, metaJson)
+      const tickers = metaJson.tickers ?? []
       const results = await Promise.allSettled(
-        list.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => r.json()))
+        tickers.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
       )
       const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
       setItems(ok)
+      writeCache(LIST_CACHE_KEY, ok)
+      ok.forEach(row => writeCache(`${TICKER_CACHE_PREFIX}${row.ticker}`, row))
+      setUsingCache(false)
     } catch (e) {
       console.error('Failed to load data', e)
+      setError('Failed to load leaderboard data.')
+      if (cachedList) {
+        setItems(prev => prev.length ? prev : cachedList.payload)
+        setUsingCache(true)
+      }
     } finally {
       setLoading(false)
     }
   }
-
-  useEffect(() => { fetchAll() }, [])
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase()
@@ -45,7 +108,7 @@ export default function Leaderboard() {
     } else if (preset === 'UNDERVALUED') {
       arr = arr.filter(x => {
         const fy = (x as any)?.fundamentals?.fcf_yield
-        return typeof fy === 'number' && fy >= 8
+        return typeof fy === 'number' && fy >= 0.08
       })
     } else if (preset === 'LOW_ATR') {
       arr = arr.filter(x => {
@@ -80,22 +143,23 @@ export default function Leaderboard() {
   return (
     <section>
       <h1 style={{margin:'8px 0'}}>Leaderboard</h1>
-      <div style={{display:'flex', gap:12, alignItems:'center'}}>
+      <div style={{display:'flex', gap:12, alignItems:'center', flexWrap:'wrap'}}>{/* Controls */}
         <input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} style={{padding:'8px', border:'1px solid #ddd'}} />
-        <button onClick={fetchAll} disabled={loading} style={btnMini}>{loading ? 'Refreshing…' : 'Refresh'}</button>
-        <small style={{color:'#666'}}>Updated: {meta?.generated_at ?? '—'}</small>
-        <select value={preset} onChange={e=>setPreset(e.target.value as any)} style={{padding:'6px', border:'1px solid #ddd'}}>
+        <button onClick={()=>fetchAll(true)} disabled={loading} style={btnMini}>{loading ? 'Refreshing...' : 'Refresh'}</button>
+        <small style={{color:'#666'}}>Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
+        <select value={preset} onChange={e=>setPreset(e.target.value as any)} style={{padding:'6px', border:'1px solid #ddd'}}>{/* Presets */}
           <option value="NONE">Presets</option>
           <option value="HIGH_MOM">High momentum</option>
           <option value="UNDERVALUED">Undervalued</option>
           <option value="LOW_ATR">Low ATR%</option>
         </select>
-        <label style={{display:'flex', alignItems:'center', gap:6}}>
+        <label style={{display:'flex', alignItems:'center', gap:6}}>{/* Only priced */}
           <input type="checkbox" checked={onlyPriced} onChange={e=>setOnlyPriced(e.target.checked)} />
           Only with price
         </label>
       </div>
-      <table style={{width:'100%', borderCollapse:'collapse', marginTop:12}}>
+      {error ? <div style={alertWarn}>{error}</div> : null}
+      <table style={{width:'100%', borderCollapse:'collapse', marginTop:12}}>{/* Table */}
         <thead>
           <tr>
             <th style={th}>Ticker</th>
@@ -105,16 +169,6 @@ export default function Leaderboard() {
             <th style={th}>Tech</th>
             <th style={th}>Sent</th>
             <th style={th}>Flags</th>
-        <select value={preset} onChange={e=>setPreset(e.target.value as any)} style={{padding:'6px', border:'1px solid #ddd'}}>
-          <option value="NONE">Presets</option>
-          <option value="HIGH_MOM">High momentum</option>
-          <option value="UNDERVALUED">Undervalued</option>
-          <option value="LOW_ATR">Low ATR%</option>
-        </select>
-        <label style={{display:'flex', alignItems:'center', gap:6}}>
-          <input type="checkbox" checked={onlyPriced} onChange={e=>setOnlyPriced(e.target.checked)} />
-          Only with price
-        </label>
             <th style={th}></th>
           </tr>
         </thead>
@@ -150,7 +204,7 @@ const th: React.CSSProperties = { textAlign:'left', borderBottom:'1px solid #eee
 const td: React.CSSProperties = { borderBottom:'1px solid #f2f2f2', padding:'8px' }
 const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer', marginLeft:8 }
 const badgeWarn: React.CSSProperties = { display:'inline-block', padding:'2px 6px', borderRadius:12, background:'#fff3cd', color:'#8a6d3b', border:'1px solid #ffe69c', fontSize:12 }
-
+const alertWarn: React.CSSProperties = { marginTop:8, padding:'8px 12px', background:'#fff4e5', border:'1px solid #ffd8a8', borderRadius:8, color:'#8a6d3b' }
 
 function scoreColor(n?: number) {
   const v = n ?? 0
@@ -160,7 +214,6 @@ function scoreColor(n?: number) {
 }
 
 function fmt(n?: number | null) {
-  if (n == null) return '—'
+  if (n == null) return '--'
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n)
 }
-
