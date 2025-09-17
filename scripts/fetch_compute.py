@@ -323,7 +323,20 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
         }
         url = "https://news.google.com/rss/search?" + urlencode(params)
 
-        d = feedparser.parse(url)
+        # Fetch with explicit User-Agent to avoid bot filtering
+        try:
+            from urllib.request import Request, urlopen  # type: ignore
+            req = Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 StockDashBot/1.0",
+                "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.7",
+            })
+            with urlopen(req, timeout=20) as resp:
+                content = resp.read()
+            d = feedparser.parse(content)
+        except Exception:
+            # Fallback to feedparser direct URL fetch
+            d = feedparser.parse(url)
 
         from time import mktime
         import datetime as dt
