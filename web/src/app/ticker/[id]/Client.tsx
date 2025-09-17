@@ -387,7 +387,7 @@ export default function TickerClient({ id }: { id: string }) {
             <Metric label="Signal terms" value={signalEval.value} points={signalEval.points} max={signalEval.max} hint={signalEval.hint} />
           </div>
           <div style={{marginTop:8}}>{/* Sentiment actions */}
-            <a href={newsUrl} target="_blank" rel="noopener noreferrer">View on Google News -&gt;</a>
+            <a href={newsUrl} target="_blank" rel="noopener noreferrer" style={btn} title="Open Google News">View on Google News -&gt;</a>
           </div>
         </div>
       </div>
