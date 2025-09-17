@@ -365,3 +365,79 @@ Commit .github/workflows/nightly.yml.
 Push main.
 
 Repo Settings → Pages → set build output folder (see section 8).
+
+
+## 14) Projektstatus (pr. 17-09-2025)
+
+- Overblik
+  - Repo-struktur matcher planen: `scripts/`, `data/`, `web/` er til stede. [DONE]
+  - Python datapipeline: `scripts/fetch_compute.py` findes, og der ligger mange filer i `/data/*.json` inkl. `meta.json` → pipeline kører. [DONE]
+  - Web: Next.js-konfiguration (`web/next.config.ts`) og `web/out` eksisterer → statisk eksport er bygget. [DONE]
+  - Watchlist: `scripts/tickers.txt` findes. [DONE]
+  - GitHub Actions (cron): Kører automatisk og committer opdateret `/data` til main. [DONE]
+  - GitHub Pages/CDN: Live og serverer siten samt `/data`. [DONE]
+  - Leaderboard/Detalje/Portfolio UI: Implementeret (baseline), viser data for alle tickers. [DONE]
+  - Reliability (retry/cache): Delvist på plads (client-cache/defensive fetch). Pipeline-fallback kan udbygges. [PARTIAL]
+
+- Hurtig status pr. roadmap
+  - v0.1 — Skeleton: [DONE]
+  - v0.2 — Data pipeline + Actions/Pages: Kører og opdaterer automatisk. [DONE]
+  - v0.3 — UX polish (baseline: søgning, farvekoder, detaljer, charts): [DONE]
+  - v0.4 — Watchlist control: Delvist (Add/Remove via GitHub issue-link). [PARTIAL]
+  - v0.5 — Reliability: Delvist (client-cache; pipeline fallback/retry TBD). [PARTIAL]
+  - v0.6 — Portfolio (local-only): Implementeret (import/export, PnL). [DONE]
+
+- Næste minimale skridt (anbefalet rækkefølge)
+  1) UI polish: konsolider styling (fx Tailwind + shadcn/ui), `ScoreBadge`, sticky header, zebra-rows, Detail Drawer med små charts.
+  2) Pipeline-reliabilitet: try/except per ticker, backoff/retries, og fallback til sidste gyldige JSON; tilføj `schema_version` + klare `flags`.
+  3) Watchlist-automation: udvid flowet, så Issues/PR labels kan opdatere `scripts/tickers.txt` automatisk via Action.
+  4) Tests/QA: små Jest/RTL tests på UI; smoke-test og `--dry-run` til Python, samt CI-lint/format.
+
+## 15) Forbedringsmuligheder (teknisk)
+
+- Python datapipeline
+  - Robusthed pr. ticker: `try/except` omkring alle eksterne kald + fallback til sidste gyldige JSON for at undgå “blanke” outputs.
+  - Let cache/ETag: gem sidste response timestamps for at undgå unødvendige fetches.
+  - Skema og flags: tydelig `schema_version`, `generated_at`, `flags` og `data_quality` pr. ticker.
+  - Struktur: del `fetch_compute.py` i moduler (`fetch_quotes.py`, `compute_indicators.py`, `fetch_rss.py`, `score.py`).
+
+- CI/CD
+  - Actions: retries/backoff og artefakt-upload for logs ved fejl.
+  - Cron: begræns tickers (10–50) og spred kørselstider for at være “rate-limit friendly”.
+
+- Frontend datahåndtering
+  - Defensive fetch: tomme/korrupt JSON håndteres med venlige empty-states og “Last updated”.
+  - Client cache: `localStorage`/IndexedDB for hurtigere navigation og offline-læsning.
+
+## 16) UI – gør det mere lækkert (hurtig gevinst + konsistens)
+
+- Designsystem og tema
+  - Brug Tailwind CSS + et komponentbibliotek (shadcn/ui eller Chakra) for hurtigt, ensartet design.
+  - Farver: score→farve med farveblind-sikre paletter (≥70: grøn, 50–69: amber, <50: rød). Brug bløde gradients og 1–2 niveaus skygger.
+  - Typografi: Inter/Geist med klare hierarkier (H1–H3, overline til flags).
+
+- Komponenter og mikrointeraktioner
+  - ScoreBadge: kompakt chip/pille med farve + tooltip (viser fordeling: Fund/Tech/Sent).
+  - Leaderboard: zebra-rows, sticky header, kolonneikoner, hover-tilstand, klik åbner Detail Drawer.
+  - Detail Drawer: små sparklines (pris, SMA50/200), mini-kort for RSI/ATR%, badges for flags.
+  - Skeleton loaders + Empty-states: undgå “hop” i layout; vis venlige beskeder ved manglende data.
+  - Dark mode toggle: system-default + manuel override.
+
+- Diagrammer og ikoner
+  - Chart.js eller Recharts med bløde gridlines, subtile punktmarkører og ens afstande/margener.
+  - Ikoner: Tabler Icons eller Heroicons for rene, letlæselige symboler (fx flag, info, sentiment).
+
+- Tilgængelighed og oplevelse
+  - Kontrast ≥ WCAG AA, fokus-styles, tastaturnavigation på tabelrækker og knapper.
+  - Ydelse: kode-split på Detail-komponent, memoization på tabelrækker, debounce på søgning.
+
+- Konkrete TODOs (UI)
+  - [ ] Installer Tailwind + vælg komponentbibliotek (shadcn/ui eller Chakra).
+  - [ ] Implementér `ScoreBadge` og farvekodet `ScoreCell`.
+  - [ ] Style Leaderboard-tabel (sticky header, zebra, hover, klik→drawer).
+  - [ ] Byg `DetailDrawer` med 3 små charts (pris+SMA, RSI, ATR%).
+  - [ ] Tilføj `DarkModeToggle` og gem preferencer i `localStorage`.
+  - [ ] Tom-/fejltilstande og skeletons for alle sider.
+
+- Deploy/UI verifikation
+  - Efter build/export: åben Pages-URL og valider at: 1) `/data/meta.json` kan hentes, 2) farver/kontraster er korrekte i både lys/mørk tilstand, 3) tabel er responsiv (mobil/desktop).
