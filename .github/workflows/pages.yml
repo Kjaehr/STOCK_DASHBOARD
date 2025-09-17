@@ -57,6 +57,9 @@ jobs:
         run: |
           mkdir -p out/data
           cp -r ../data/* out/data/
+      - name: Ensure GitHub Pages serves _next (create .nojekyll)
+        run: |
+          touch out/.nojekyll
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
