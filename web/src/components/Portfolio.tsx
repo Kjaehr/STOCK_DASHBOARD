@@ -9,6 +9,7 @@ import { Button } from './ui/button'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
 import { Badge } from './ui/badge'
 import { ArrowUpDown } from 'lucide-react'
+import * as Tooltip from '@radix-ui/react-tooltip'
 
 type Holding = { ticker: string; qty: number; avgCost: number }
 
@@ -135,7 +136,11 @@ export default function Portfolio() {
 
   const totals = useMemo(() => {
     const totalValue = rows.reduce((a, r) => a + (r.value ?? 0), 0)
-    return { totalValue }
+    const totalCost = rows.reduce((a, r) => a + (r.qty * r.avgCost), 0)
+    const totalGain = totalValue - totalCost
+    const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : null
+    const avgScore = rows.length ? (rows.reduce((a,r)=> a + (r.score ?? 0), 0) / rows.length) : null
+    return { totalValue, totalCost, totalGain, totalGainPct, avgScore }
   }, [rows])
 
   const sortedRows = useMemo(() => {
@@ -213,6 +218,7 @@ export default function Portfolio() {
 
   return (
     <section className="space-y-3">
+      <Tooltip.Provider delayDuration={200}>
       <h1 className="text-xl font-semibold">Portfolio</h1>
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
@@ -279,13 +285,45 @@ export default function Portfolio() {
                 <TableCell className="text-right tabular-nums">{fmt(r.value)}</TableCell>
                 <TableCell className={"text-right tabular-nums " + ((r.gain ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}>{fmt(r.gain)}</TableCell>
                 <TableCell className="text-right tabular-nums">{pct(r.gainPct)}</TableCell>
-                <TableCell className="text-right"><Badge className={scoreBadgeClass(r.score ?? 0)}>{r.score ?? '--'}</Badge></TableCell>
+                <TableCell className="text-right">
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <Badge className={scoreBadgeClass(r.score ?? 0)}>{r.score ?? '--'}</Badge>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+                        Fund {dataMap[r.ticker]?.fund_points ?? '--'} / Tech {dataMap[r.ticker]?.tech_points ?? '--'} / Sent {dataMap[r.ticker]?.sent_points ?? '--'}
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </TableCell>
                 <TableCell className="text-right"><Button variant="outline" size="sm" onClick={()=>removeHolding(r.ticker)}>Remove</Button></TableCell>
               </TableRow>
             ))}
+            <TableRow className="font-medium sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-20 border-t">
+              <TableCell className="sticky left-0 z-20 bg-background/95">Total</TableCell>
+              <TableCell />
+              <TableCell />
+              <TableCell />
+              <TableCell className="text-right tabular-nums">
+                {fmt(totals.totalValue)}
+                <span className="block text-xs text-muted-foreground">Cost: {fmt(totals.totalCost)}</span>
+              </TableCell>
+              <TableCell className={"text-right tabular-nums " + ((totals.totalGain ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}>{fmt(totals.totalGain)}</TableCell>
+              <TableCell className="text-right tabular-nums">{pct(totals.totalGainPct)}</TableCell>
+              <TableCell className="text-right">Avg score: {totals.avgScore == null ? '--' : totals.avgScore.toFixed(1)}</TableCell>
+              <TableCell />
+            </TableRow>
           </TableBody>
         </Table>
       </div>
+
+      <div className="flex items-center justify-between text-sm text-muted-foreground">
+        <span>Showing {sortedRows.length} of {rows.length}</span>
+        <span>Average score: {totals.avgScore == null ? '--' : totals.avgScore.toFixed(1)}</span>
+      </div>
+      </Tooltip.Provider>
     </section>
   )
 }

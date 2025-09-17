@@ -11,6 +11,7 @@ import { Switch } from './ui/switch'
 import { Badge } from './ui/badge'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
 import { ArrowUpDown } from 'lucide-react'
+import * as Tooltip from '@radix-ui/react-tooltip'
 
 const META_CACHE_KEY = 'stockdash:meta'
 const LIST_CACHE_KEY = 'stockdash:leaderboard'
@@ -189,6 +190,7 @@ export default function Leaderboard() {
 
   return (
     <section className="space-y-3">
+      <Tooltip.Provider delayDuration={200}>
       <h1 className="text-xl font-semibold">Leaderboard</h1>
       <div className="flex flex-wrap items-center gap-3">{/* Controls */}
         <Input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
@@ -246,7 +248,17 @@ export default function Leaderboard() {
               <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
                 <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{row.ticker}</TableCell>
                 <TableCell>
-                  <Badge className={scoreBadgeClass(row.score)}>{row.score ?? 0}</Badge>
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <Badge className={scoreBadgeClass(row.score)}>{row.score ?? 0}</Badge>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+                        Fund {row.fund_points ?? '--'} / Tech {row.tech_points ?? '--'} / Sent {row.sent_points ?? '--'}
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
                   {fmt(row.price)}{' '}
@@ -262,12 +274,22 @@ export default function Leaderboard() {
                     const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail'))
                     if (!shown.length) return '—'
                     return (
-                      <span className="flex flex-wrap gap-1">
-                        {shown.slice(0,4).map(f => (
-                          <Badge key={String(f)} variant="outline" className="font-normal">{String(f)}</Badge>
-                        ))}
-                        {shown.length > 4 ? <span className="text-xs text-muted-foreground">+{shown.length-4} more</span> : null}
-                      </span>
+                      <Tooltip.Root>
+                        <Tooltip.Trigger asChild>
+                          <span className="flex flex-wrap gap-1">
+                            {shown.slice(0,4).map(f => (
+                              <Badge key={String(f)} variant="outline" className="font-normal">{String(f)}</Badge>
+                            ))}
+                            {shown.length > 4 ? <span className="text-xs text-muted-foreground">+{shown.length-4} more</span> : null}
+                          </span>
+                        </Tooltip.Trigger>
+                        <Tooltip.Portal>
+                          <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md max-w-[280px]">
+                            {shown.join(', ')}
+                            <Tooltip.Arrow className="fill-border" />
+                          </Tooltip.Content>
+                        </Tooltip.Portal>
+                      </Tooltip.Root>
                     )
                   })()}
                 </TableCell>
@@ -280,6 +302,12 @@ export default function Leaderboard() {
           </TableBody>
         </Table>
       </div>
+
+      <div className="flex items-center justify-between text-sm text-muted-foreground">
+        <span>Showing {filtered.length} of {items.length}</span>
+        <span>Average score: {filtered.length ? (filtered.reduce((a,r)=>a + (r.score ?? 0), 0) / filtered.length).toFixed(1) : '--'}</span>
+      </div>
+      </Tooltip.Provider>
     </section>
   )
 }
