@@ -1,12 +1,13 @@
 "use client"
 import { useEffect, useMemo, useState } from 'react'
-import type { StockMeta, StockData } from '../types'
+import type { StockData } from '../types'
 import { BASE } from '../base'
 
 // UI components (shadcn/ui)
 import { Input } from './ui/input'
 import { Button } from './ui/button'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
+import { Badge } from './ui/badge'
 
 type Holding = { ticker: string; qty: number; avgCost: number }
 
@@ -75,7 +76,6 @@ function downloadFile(contents: string, filename: string, mime: string) {
 
 export default function Portfolio() {
   const [holdings, setHoldings] = useState<Holding[]>([])
-  const [meta, setMeta] = useState<StockMeta | null>(null)
   const [dataMap, setDataMap] = useState<Record<string, StockData>>({})
 
   const [loading, setLoading] = useState(false)
@@ -96,8 +96,6 @@ export default function Portfolio() {
     const run = async () => {
       try {
         setLoading(true)
-        const m = await fetch(`${BASE}/data/meta.json`).then(r => r.json()) as StockMeta
-        setMeta(m)
         const wanted = Array.from(new Set(holdings.map(h => h.ticker)))
         const results = await Promise.allSettled(wanted.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => r.json())))
         const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
@@ -210,46 +208,47 @@ export default function Portfolio() {
         <strong>Total value:</strong> {fmt(totals.totalValue)}
       </div>
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Ticker</TableHead>
-            <TableHead>Qty</TableHead>
-            <TableHead>Avg cost</TableHead>
-            <TableHead>Price</TableHead>
-            <TableHead>Value</TableHead>
-            <TableHead>Gain</TableHead>
-            <TableHead>Gain %</TableHead>
-            <TableHead>Score</TableHead>
-            <TableHead></TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map(r => (
-            <TableRow key={r.ticker}>
-              <TableCell>{r.ticker}</TableCell>
-              <TableCell>{num(r.qty)}</TableCell>
-              <TableCell>{fmt(r.avgCost)}</TableCell>
-              <TableCell>{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</TableCell>
-              <TableCell>{fmt(r.value)}</TableCell>
-              <TableCell className={(r.gain ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}>{fmt(r.gain)}</TableCell>
-              <TableCell>{pct(r.gainPct)}</TableCell>
-              <TableCell className={scoreClass(r.score ?? 0)}>{r.score ?? '--'}</TableCell>
-              <TableCell><Button variant="outline" size="sm" onClick={()=>removeHolding(r.ticker)}>Remove</Button></TableCell>
+      <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
+        <Table className="w-full text-sm">
+          <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+            <TableRow className="hover:bg-transparent">
+              <TableHead>Ticker</TableHead>
+              <TableHead className="text-right">Qty</TableHead>
+              <TableHead className="text-right">Avg cost</TableHead>
+              <TableHead className="text-right">Price</TableHead>
+              <TableHead className="text-right">Value</TableHead>
+              <TableHead className="text-right">Gain</TableHead>
+              <TableHead className="text-right">Gain %</TableHead>
+              <TableHead className="text-right">Score</TableHead>
+              <TableHead className="text-right" />
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {rows.map(r => (
+              <TableRow key={r.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
+                <TableCell className="font-medium">{r.ticker}</TableCell>
+                <TableCell className="text-right tabular-nums">{num(r.qty)}</TableCell>
+                <TableCell className="text-right tabular-nums">{fmt(r.avgCost)}</TableCell>
+                <TableCell className="text-right tabular-nums">{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</TableCell>
+                <TableCell className="text-right tabular-nums">{fmt(r.value)}</TableCell>
+                <TableCell className={"text-right tabular-nums " + ((r.gain ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}>{fmt(r.gain)}</TableCell>
+                <TableCell className="text-right tabular-nums">{pct(r.gainPct)}</TableCell>
+                <TableCell className="text-right"><Badge className={scoreBadgeClass(r.score ?? 0)}>{r.score ?? '--'}</Badge></TableCell>
+                <TableCell className="text-right"><Button variant="outline" size="sm" onClick={()=>removeHolding(r.ticker)}>Remove</Button></TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </section>
   )
 }
 
-
-function scoreClass(n?: number | null) {
+function scoreBadgeClass(n?: number | null) {
   const v = (n ?? 0) as number
-  if (v >= 70) return 'text-green-600'
-  if (v >= 50) return 'text-orange-500'
-  return 'text-red-600'
+  if (v >= 70) return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+  if (v >= 50) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-200'
+  return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
 }
 
 
@@ -264,9 +263,4 @@ function num(n?: number | null) {
 function pct(n?: number | null) {
   if (n == null) return '--'
   return `${n.toFixed(2)}%`
-}
-function scoreColor(v: number) {
-  if (v >= 70) return 'green'
-  if (v >= 50) return 'orange'
-  return 'crimson'
 }

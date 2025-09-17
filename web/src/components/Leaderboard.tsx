@@ -169,7 +169,7 @@ export default function Leaderboard() {
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
         <Select value={preset} onValueChange={(v)=>setPreset(v as any)}>
-          <SelectTrigger className="w-40"><SelectValue placeholder="Presets" /></SelectTrigger>
+          <SelectTrigger className="w-44"><SelectValue placeholder="Presets" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="NONE">Presets</SelectItem>
             <SelectItem value="HIGH_MOM">High momentum</SelectItem>
@@ -189,46 +189,67 @@ export default function Leaderboard() {
 
       {error ? <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">{error}</div> : null}
 
-      <Table>{/* Table */}
-        <TableHeader>
-          <TableRow>
-            <TableHead>Ticker</TableHead>
-            <TableHead>Score</TableHead>
-            <TableHead>Price</TableHead>
-            <TableHead>Fund</TableHead>
-            <TableHead>Tech</TableHead>
-            <TableHead>Sent</TableHead>
-            <TableHead>Flags</TableHead>
-            <TableHead></TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {filtered.map(row => (
-            <TableRow key={row.ticker}>
-              <TableCell>{row.ticker}</TableCell>
-              <TableCell>
-                <Badge variant="secondary" className={scoreClass(row.score)}>{row.score ?? 0}</Badge>
-              </TableCell>
-              <TableCell>
-                {fmt(row.price)}{' '}
-                {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
-                  <Badge variant="outline" className="border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
-                ) : null}
-              </TableCell>
-              <TableCell>{row.fund_points ?? 0}</TableCell>
-              <TableCell>{row.tech_points ?? 0}</TableCell>
-              <TableCell>{row.sent_points ?? 0}</TableCell>
-              <TableCell><small>{(() => { const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail')); return shown.length?shown.join(', '):'—' })()}</small></TableCell>
-              <TableCell className="space-x-2">
-                <a className="underline underline-offset-2" href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
-                <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
-              </TableCell>
+      <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
+        <Table className="w-full text-sm">{/* Table */}
+          <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="whitespace-nowrap">Ticker</TableHead>
+              <TableHead className="whitespace-nowrap">Score</TableHead>
+              <TableHead className="text-right whitespace-nowrap">Price</TableHead>
+              <TableHead className="text-right whitespace-nowrap">Fund</TableHead>
+              <TableHead className="text-right whitespace-nowrap">Tech</TableHead>
+              <TableHead className="text-right whitespace-nowrap">Sent</TableHead>
+              <TableHead className="whitespace-nowrap">Flags</TableHead>
+              <TableHead className="text-right" />
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {filtered.map(row => (
+              <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
+                <TableCell className="font-medium">{row.ticker}</TableCell>
+                <TableCell>
+                  <Badge className={scoreBadgeClass(row.score)}>{row.score ?? 0}</Badge>
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {fmt(row.price)}{' '}
+                  {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
+                    <Badge variant="outline" className="ml-2 border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
+                  ) : null}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{row.fund_points ?? 0}</TableCell>
+                <TableCell className="text-right tabular-nums">{row.tech_points ?? 0}</TableCell>
+                <TableCell className="text-right tabular-nums">{row.sent_points ?? 0}</TableCell>
+                <TableCell className="max-w-[220px] truncate">
+                  {(() => {
+                    const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail'))
+                    if (!shown.length) return '—'
+                    return (
+                      <span className="flex flex-wrap gap-1">
+                        {shown.slice(0,4).map(f => (
+                          <Badge key={String(f)} variant="outline" className="font-normal">{String(f)}</Badge>
+                        ))}
+                        {shown.length > 4 ? <span className="text-xs text-muted-foreground">+{shown.length-4} more</span> : null}
+                      </span>
+                    )
+                  })()}
+                </TableCell>
+                <TableCell className="text-right space-x-2 whitespace-nowrap">
+                  <a className="underline underline-offset-2" href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
+                  <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </section>
   )
+
+function scoreBadgeClass(n?: number) {
+  const v = n ?? 0
+  if (v >= 70) return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+  if (v >= 50) return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-200'
+  return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
 }
 
 

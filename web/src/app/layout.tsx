@@ -6,6 +6,7 @@ export const metadata = {
 import './globals.css'
 import { BASE } from '../base'
 import { ThemeProvider } from "../components/theme-provider"
+import { ThemeToggle } from "../components/theme-toggle"
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -13,9 +14,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen bg-background text-foreground">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <header className="border-b border-border">
-            <nav className="container mx-auto flex gap-4 px-4 py-3">
-              <a className="hover:underline" href={`${BASE}/`}>Leaderboard</a>
-              <a className="hover:underline" href={`${BASE}/portfolio`}>Portfolio</a>
+            <nav className="container mx-auto flex items-center justify-between px-4 py-3">
+              <div className="flex items-center gap-4">
+                <a className="hover:underline" href={`${BASE}/`}>Leaderboard</a>
+                <a className="hover:underline" href={`${BASE}/portfolio`}>Portfolio</a>
+              </div>
+              <ThemeToggle />
             </nav>
           </header>
           <main className="container mx-auto px-4 py-4">{children}</main>
