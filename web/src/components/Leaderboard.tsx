@@ -244,6 +244,8 @@ export default function Leaderboard() {
       </div>
     </section>
   )
+}
+
 
 function scoreBadgeClass(n?: number) {
   const v = n ?? 0
