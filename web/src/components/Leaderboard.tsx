@@ -190,7 +190,7 @@ export default function Leaderboard() {
 
   return (
     <section className="space-y-3">
-      <Tooltip.Provider delayDuration={200}>
+      <Tooltip.Provider delayDuration={0}>
       <h1 className="text-xl font-semibold">Leaderboard</h1>
       <div className="flex flex-wrap items-center gap-3">{/* Controls */}
         <Input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
@@ -222,22 +222,22 @@ export default function Leaderboard() {
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
             <TableRow className="hover:bg-transparent">
               <TableHead className="whitespace-nowrap sticky left-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-                <button onClick={()=>toggleSort('ticker')} className="inline-flex items-center gap-1">Ticker <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('ticker')} className="inline-flex items-center gap-1" title="Sort by ticker">Ticker <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="whitespace-nowrap">
-                <button onClick={()=>toggleSort('score')} className="inline-flex items-center gap-1">Score <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('score')} className="inline-flex items-center gap-1" title="Sort by total score">Score <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
-                <button onClick={()=>toggleSort('price')} className="inline-flex items-center gap-1">Price <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('price')} className="inline-flex items-center gap-1" title="Sort by price">Price <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
-                <button onClick={()=>toggleSort('fund')} className="inline-flex items-center gap-1">Fund <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('fund')} className="inline-flex items-center gap-1" title="Sort by fundamentals">Fund <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
-                <button onClick={()=>toggleSort('tech')} className="inline-flex items-center gap-1">Tech <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('tech')} className="inline-flex items-center gap-1" title="Sort by technicals">Tech <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
-                <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+                <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1" title="Sort by sentiment">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="whitespace-nowrap">Flags</TableHead>
               <TableHead className="text-right" />
@@ -250,7 +250,7 @@ export default function Leaderboard() {
                 <TableCell>
                   <Tooltip.Root>
                     <Tooltip.Trigger asChild>
-                      <Badge className={scoreBadgeClass(row.score)}>{row.score ?? 0}</Badge>
+                      <Badge className={scoreBadgeClass(row.score)} title={`Fund ${row.fund_points ?? '--'} / Tech ${row.tech_points ?? '--'} / Sent ${row.sent_points ?? '--'}`}>{row.score ?? 0}</Badge>
                     </Tooltip.Trigger>
                     <Tooltip.Portal>
                       <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
