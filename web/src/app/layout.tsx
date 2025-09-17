@@ -5,18 +5,21 @@ export const metadata = {
 
 import './globals.css'
 import { BASE } from '../base'
+import { ThemeProvider } from "../components/theme-provider"
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>
-        <header style={{padding:'12px 16px', borderBottom:'1px solid #eee'}}>
-          <nav style={{display:'flex', gap:16}}>
-            <a href={`${BASE}/`}>Leaderboard</a>
-            <a href={`${BASE}/portfolio`}>Portfolio</a>
-          </nav>
-        </header>
-        <main style={{padding:'16px'}}>{children}</main>
+    <html lang="en" suppressHydrationWarning>
+      <body className="min-h-screen bg-background text-foreground">
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <header className="border-b border-border">
+            <nav className="container mx-auto flex gap-4 px-4 py-3">
+              <a className="hover:underline" href={`${BASE}/`}>Leaderboard</a>
+              <a className="hover:underline" href={`${BASE}/portfolio`}>Portfolio</a>
+            </nav>
+          </header>
+          <main className="container mx-auto px-4 py-4">{children}</main>
+        </ThemeProvider>
       </body>
     </html>
   )

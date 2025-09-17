@@ -3,6 +3,11 @@ import { useEffect, useMemo, useState } from 'react'
 import type { StockMeta, StockData } from '../types'
 import { BASE } from '../base'
 
+// UI components (shadcn/ui)
+import { Input } from './ui/input'
+import { Button } from './ui/button'
+import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
+
 type Holding = { ticker: string; qty: number; avgCost: number }
 
 const LS_KEY = 'portfolio'
@@ -179,73 +184,74 @@ export default function Portfolio() {
   }
 
   return (
-    <section>
-      <h1 style={{margin:'8px 0'}}>Portfolio</h1>
-      <div style={{display:'flex', gap:12, flexWrap:'wrap', alignItems:'end'}}>
-        <div>
-          <label>Ticker<br/>
-            <input value={form.ticker} onChange={e=>setForm({...form, ticker:e.target.value})} placeholder="e.g., APLD" style={inp} />
-          </label>
+    <section className="space-y-3">
+      <h1 className="text-xl font-semibold">Portfolio</h1>
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-1">
+          <label className="text-sm text-muted-foreground">Ticker</label>
+          <Input value={form.ticker} onChange={e=>setForm({...form, ticker:e.target.value})} placeholder="e.g., APLD" className="w-32" />
         </div>
-        <div>
-          <label>Qty<br/>
-            <input type="number" value={form.qty} onChange={e=>setForm({...form, qty:Number(e.target.value)})} style={inp} />
-          </label>
+        <div className="flex flex-col gap-1">
+          <label className="text-sm text-muted-foreground">Qty</label>
+          <Input type="number" value={form.qty} onChange={e=>setForm({...form, qty:Number(e.target.value)})} className="w-28" />
         </div>
-        <div>
-          <label>Avg cost<br/>
-            <input type="number" value={form.avgCost} onChange={e=>setForm({...form, avgCost:Number(e.target.value)})} style={inp} />
-          </label>
+        <div className="flex flex-col gap-1">
+          <label className="text-sm text-muted-foreground">Avg cost</label>
+          <Input type="number" value={form.avgCost} onChange={e=>setForm({...form, avgCost:Number(e.target.value)})} className="w-28" />
         </div>
-        <button onClick={addHolding} style={btn}>Add/Update</button>
-        <input type="file" accept={FILE_ACCEPT} onChange={onImport} />
-        <button onClick={()=>setRefreshTick(x=>x+1)} disabled={loading || !holdings.length} style={btn}>{loading ? 'Refreshing...' : 'Refresh data'}</button>
-        <button onClick={onExportJson} style={btn}>Export JSON</button>
-        <button onClick={onExportCsv} style={btn}>Export CSV</button>
+        <Button onClick={addHolding}>Add/Update</Button>
+        <input type="file" accept={FILE_ACCEPT} onChange={onImport} className="text-sm" />
+        <Button onClick={()=>setRefreshTick(x=>x+1)} disabled={loading || !holdings.length}>{loading ? 'Refreshing...' : 'Refresh data'}</Button>
+        <Button onClick={onExportJson} variant="outline">Export JSON</Button>
+        <Button onClick={onExportCsv} variant="outline">Export CSV</Button>
       </div>
 
-      <div style={{marginTop:12}}>
+      <div>
         <strong>Total value:</strong> {fmt(totals.totalValue)}
       </div>
 
-      <table style={{width:'100%', borderCollapse:'collapse', marginTop:12}}>
-        <thead>
-          <tr>
-            <th style={th}>Ticker</th>
-            <th style={th}>Qty</th>
-            <th style={th}>Avg cost</th>
-            <th style={th}>Price</th>
-            <th style={th}>Value</th>
-            <th style={th}>Gain</th>
-            <th style={th}>Gain %</th>
-            <th style={th}>Score</th>
-            <th style={th}></th>
-          </tr>
-        </thead>
-        <tbody>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Ticker</TableHead>
+            <TableHead>Qty</TableHead>
+            <TableHead>Avg cost</TableHead>
+            <TableHead>Price</TableHead>
+            <TableHead>Value</TableHead>
+            <TableHead>Gain</TableHead>
+            <TableHead>Gain %</TableHead>
+            <TableHead>Score</TableHead>
+            <TableHead></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {rows.map(r => (
-            <tr key={r.ticker}>
-              <td style={td}>{r.ticker}</td>
-              <td style={td}>{num(r.qty)}</td>
-              <td style={td}>{fmt(r.avgCost)}</td>
-              <td style={td}>{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</td>
-              <td style={td}>{fmt(r.value)}</td>
-              <td style={{...td, color: (r.gain ?? 0) >= 0 ? 'green' : 'crimson'}}>{fmt(r.gain)}</td>
-              <td style={td}>{pct(r.gainPct)}</td>
-              <td style={{...td, color: scoreColor(r.score ?? 0)}}>{r.score ?? '--'}</td>
-              <td style={td}><button onClick={()=>removeHolding(r.ticker)} style={btn}>Remove</button></td>
-            </tr>
+            <TableRow key={r.ticker}>
+              <TableCell>{r.ticker}</TableCell>
+              <TableCell>{num(r.qty)}</TableCell>
+              <TableCell>{fmt(r.avgCost)}</TableCell>
+              <TableCell>{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</TableCell>
+              <TableCell>{fmt(r.value)}</TableCell>
+              <TableCell className={(r.gain ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}>{fmt(r.gain)}</TableCell>
+              <TableCell>{pct(r.gainPct)}</TableCell>
+              <TableCell className={scoreClass(r.score ?? 0)}>{r.score ?? '--'}</TableCell>
+              <TableCell><Button variant="outline" size="sm" onClick={()=>removeHolding(r.ticker)}>Remove</Button></TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </section>
   )
 }
 
-const inp: React.CSSProperties = { padding:'8px', border:'1px solid #ddd', minWidth:120 }
-const btn: React.CSSProperties = { padding:'8px 10px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer' }
-const th: React.CSSProperties = { textAlign:'left', borderBottom:'1px solid #eee', padding:'8px' }
-const td: React.CSSProperties = { borderBottom:'1px solid #f2f2f2', padding:'8px' }
+
+function scoreClass(n?: number | null) {
+  const v = (n ?? 0) as number
+  if (v >= 70) return 'text-green-600'
+  if (v >= 50) return 'text-orange-500'
+  return 'text-red-600'
+}
+
 
 function fmt(n?: number | null) {
   if (n == null) return '--'

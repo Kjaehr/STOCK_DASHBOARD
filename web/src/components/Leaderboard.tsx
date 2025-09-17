@@ -3,6 +3,14 @@ import { useEffect, useMemo, useState } from 'react'
 import type { StockMeta, StockData } from '../types'
 import { BASE } from '../base'
 
+// UI components (shadcn/ui)
+import { Input } from './ui/input'
+import { Button } from './ui/button'
+import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './ui/select'
+import { Switch } from './ui/switch'
+import { Badge } from './ui/badge'
+import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
+
 const META_CACHE_KEY = 'stockdash:meta'
 const LIST_CACHE_KEY = 'stockdash:leaderboard'
 const TICKER_CACHE_PREFIX = 'stockdash:ticker:'
@@ -154,81 +162,88 @@ export default function Leaderboard() {
 
 
   return (
-    <section>
-      <h1 style={{margin:'8px 0'}}>Leaderboard</h1>
-      <div style={{display:'flex', gap:12, alignItems:'center', flexWrap:'wrap'}}>{/* Controls */}
-        <input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} style={{padding:'8px', border:'1px solid #ddd'}} />
-        <button onClick={()=>fetchAll(true)} disabled={loading} style={btnMini}>{loading ? 'Refreshing...' : 'Refresh'}</button>
-        <small style={{color:'#666'}}>Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
-        <select value={preset} onChange={e=>setPreset(e.target.value as any)} style={{padding:'6px', border:'1px solid #ddd'}}>{/* Presets */}
-          <option value="NONE">Presets</option>
-          <option value="HIGH_MOM">High momentum</option>
-          <option value="UNDERVALUED">Undervalued</option>
-          <option value="LOW_ATR">Low ATR%</option>
-        </select>
-        <label style={{display:'flex', alignItems:'center', gap:6}}>{/* Only priced */}
-          <input type="checkbox" checked={onlyPriced} onChange={e=>setOnlyPriced(e.target.checked)} />
-          Only with price
-        </label>
-        <span style={{marginLeft:8, opacity:0.5}}>|</span>
-        <input placeholder="Add/remove ticker (e.g. AAPL or NOVO-B.CO)" value={newTicker} onChange={e=>setNewTicker(e.target.value)} style={{padding:'8px', border:'1px solid #ddd'}} />
-        <button onClick={()=>openGithubIssueFor('ADD', newTicker)} style={btnMini} title="Trigger GitHub Action via Issue">Add ticker</button>
-        <button onClick={()=>openGithubIssueFor('REMOVE', newTicker)} style={btnMini} title="Trigger GitHub Action via Issue">Remove ticker</button>
-
+    <section className="space-y-3">
+      <h1 className="text-xl font-semibold">Leaderboard</h1>
+      <div className="flex flex-wrap items-center gap-3">{/* Controls */}
+        <Input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
+        <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
+        <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
+        <Select value={preset} onValueChange={(v)=>setPreset(v as any)}>
+          <SelectTrigger className="w-40"><SelectValue placeholder="Presets" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="NONE">Presets</SelectItem>
+            <SelectItem value="HIGH_MOM">High momentum</SelectItem>
+            <SelectItem value="UNDERVALUED">Undervalued</SelectItem>
+            <SelectItem value="LOW_ATR">Low ATR%</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex items-center gap-2">{/* Only priced */}
+          <Switch checked={onlyPriced} onCheckedChange={setOnlyPriced} id="only-priced" />
+          <label htmlFor="only-priced" className="text-sm text-muted-foreground">Only with price</label>
+        </div>
+        <span className="opacity-50">|</span>
+        <Input placeholder="Add/remove ticker (e.g. AAPL or NOVO-B.CO)" value={newTicker} onChange={e=>setNewTicker(e.target.value)} className="w-80" />
+        <Button size="sm" onClick={()=>openGithubIssueFor('ADD', newTicker)} title="Trigger GitHub Action via Issue">Add ticker</Button>
+        <Button size="sm" variant="outline" onClick={()=>openGithubIssueFor('REMOVE', newTicker)} title="Trigger GitHub Action via Issue">Remove ticker</Button>
       </div>
-      {error ? <div style={alertWarn}>{error}</div> : null}
-      <table style={{width:'100%', borderCollapse:'collapse', marginTop:12}}>{/* Table */}
-        <thead>
-          <tr>
-            <th style={th}>Ticker</th>
-            <th style={th}>Score</th>
-            <th style={th}>Price</th>
-            <th style={th}>Fund</th>
-            <th style={th}>Tech</th>
-            <th style={th}>Sent</th>
-            <th style={th}>Flags</th>
-            <th style={th}></th>
-          </tr>
-        </thead>
-        <tbody>
+
+      {error ? <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">{error}</div> : null}
+
+      <Table>{/* Table */}
+        <TableHeader>
+          <TableRow>
+            <TableHead>Ticker</TableHead>
+            <TableHead>Score</TableHead>
+            <TableHead>Price</TableHead>
+            <TableHead>Fund</TableHead>
+            <TableHead>Tech</TableHead>
+            <TableHead>Sent</TableHead>
+            <TableHead>Flags</TableHead>
+            <TableHead></TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {filtered.map(row => (
-            <tr key={row.ticker}>
-              <td style={td}>{row.ticker}</td>
-              <td style={{...td, color: scoreColor(row.score)}}>{row.score ?? 0}</td>
-              <td style={td}>
+            <TableRow key={row.ticker}>
+              <TableCell>{row.ticker}</TableCell>
+              <TableCell>
+                <Badge variant="secondary" className={scoreClass(row.score)}>{row.score ?? 0}</Badge>
+              </TableCell>
+              <TableCell>
                 {fmt(row.price)}{' '}
-                {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data')))
-                  ? <span style={badgeWarn} title="Yahoo price missing for this ticker">Missing data</span>
-                  : null}
-              </td>
-              <td style={td}>{row.fund_points ?? 0}</td>
-              <td style={td}>{row.tech_points ?? 0}</td>
-              <td style={td}>{row.sent_points ?? 0}</td>
-              <td style={td}><small>{(() => { const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail')); return shown.length?shown.join(', '):'—' })()}</small></td>
-              <td style={td}>
-                <a href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
-                {' '}
-                <button onClick={()=>addToPortfolio(row.ticker, row.price)} style={btnMini}>Add</button>
-              </td>
-            </tr>
+                {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
+                  <Badge variant="outline" className="border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
+                ) : null}
+              </TableCell>
+              <TableCell>{row.fund_points ?? 0}</TableCell>
+              <TableCell>{row.tech_points ?? 0}</TableCell>
+              <TableCell>{row.sent_points ?? 0}</TableCell>
+              <TableCell><small>{(() => { const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail')); return shown.length?shown.join(', '):'—' })()}</small></TableCell>
+              <TableCell className="space-x-2">
+                <a className="underline underline-offset-2" href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
+                <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
+              </TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
     </section>
   )
 }
 
-const th: React.CSSProperties = { textAlign:'left', borderBottom:'1px solid #eee', padding:'8px' }
-const td: React.CSSProperties = { borderBottom:'1px solid #f2f2f2', padding:'8px' }
-const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer', marginLeft:8 }
-const badgeWarn: React.CSSProperties = { display:'inline-block', padding:'2px 6px', borderRadius:12, background:'#fff3cd', color:'#8a6d3b', border:'1px solid #ffe69c', fontSize:12 }
-const alertWarn: React.CSSProperties = { marginTop:8, padding:'8px 12px', background:'#fff4e5', border:'1px solid #ffd8a8', borderRadius:8, color:'#8a6d3b' }
 
 function scoreColor(n?: number) {
   const v = n ?? 0
   if (v >= 70) return 'green'
   if (v >= 50) return 'orange'
   return 'crimson'
+}
+
+function scoreClass(n?: number) {
+  const v = n ?? 0
+  if (v >= 70) return 'text-green-600'
+  if (v >= 50) return 'text-orange-500'
+  return 'text-red-600'
 }
 
 function fmt(n?: number | null) {
