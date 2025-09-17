@@ -12,9 +12,8 @@ Next steps (replace stubs with real data):
 - Map metrics to points per README and compute total score
 """
 
-import sys
-
 from __future__ import annotations
+import sys
 import json
 import os
 from pathlib import Path
