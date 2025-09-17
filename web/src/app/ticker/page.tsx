@@ -6,8 +6,9 @@ export const metadata: Metadata = {
   title: 'Ticker - Stock Dashboard',
 }
 
-export default function Page({ searchParams }: { searchParams?: { id?: string } }) {
-  const idParam = searchParams?.id
+export default async function Page({ searchParams }: { searchParams?: Promise<{ id?: string }> }) {
+  const sp = (await searchParams) || {}
+  const idParam = sp.id
   const id = idParam ? decodeURIComponent(idParam) : ''
   if (!id) {
     return (
