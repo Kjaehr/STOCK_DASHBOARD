@@ -1,7 +1,7 @@
 "use client"
 import { useEffect, useMemo, useState } from 'react'
 import type { StockData } from '../types'
-import { BASE } from '../base'
+import { DATA_BASE } from '../base'
 
 // UI components (shadcn/ui)
 import { Input } from './ui/input'
@@ -105,7 +105,7 @@ export default function Portfolio() {
       try {
         setLoading(true)
         const wanted = Array.from(new Set(holdings.map(h => h.ticker)))
-        const results = await Promise.allSettled(wanted.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => r.json())))
+        const results = await Promise.allSettled(wanted.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json`).then(r => r.json())))
         const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
         const map: Record<string, StockData> = {}
         for (const s of ok) map[s.ticker] = s

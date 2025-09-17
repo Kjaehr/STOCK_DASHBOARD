@@ -1,7 +1,7 @@
 "use client"
 import { useEffect, useMemo, useState } from 'react'
 import type { StockMeta, StockData } from '../types'
-import { BASE } from '../base'
+import { BASE, DATA_BASE } from '../base'
 
 // UI components (shadcn/ui)
 import { Input } from './ui/input'
@@ -91,12 +91,12 @@ export default function Leaderboard() {
     try {
       setLoading(true)
       setError(null)
-      const metaJson = await fetch(`${BASE}/data/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
+      const metaJson = await fetch(`${DATA_BASE}/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
       setMeta(metaJson)
       writeCache(META_CACHE_KEY, metaJson)
       const tickers = metaJson.tickers ?? []
       const results = await Promise.allSettled(
-        tickers.map(t => fetch(`${BASE}/data/${t.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
+        tickers.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
       )
       const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
       setItems(ok)
@@ -321,19 +321,6 @@ function scoreBadgeClass(n?: number) {
 }
 
 
-function scoreColor(n?: number) {
-  const v = n ?? 0
-  if (v >= 70) return 'green'
-  if (v >= 50) return 'orange'
-  return 'crimson'
-}
-
-function scoreClass(n?: number) {
-  const v = n ?? 0
-  if (v >= 70) return 'text-green-600'
-  if (v >= 50) return 'text-orange-500'
-  return 'text-red-600'
-}
 
 function fmt(n?: number | null) {
   if (n == null) return '--'
