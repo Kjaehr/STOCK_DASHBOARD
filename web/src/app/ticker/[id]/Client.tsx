@@ -299,7 +299,7 @@ export default function TickerClient({ id }: { id: string }) {
         </div>
         <div style={{display:'flex', gap:8}}>{/* Actions */}
           <a href={`${BASE}/`} style={{textDecoration:'none'}}>&larr; Back</a>
-          <button onClick={() => fetchTicker({ force: true })} disabled={loading} style={btn}>{loading ? 'Refreshing...' : 'Refresh'}</button>
+          <button onClick={() => { refreshMeta(true); fetchTicker({ force: true }) }} disabled={loading} style={btn}>{loading ? 'Refreshing...' : 'Refresh'}</button>
           <button onClick={() => addToPortfolio(id, (data as any)?.price)} style={btn}>Add to portfolio</button>
         </div>
       </div>
