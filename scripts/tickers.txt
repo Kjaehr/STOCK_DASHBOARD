@@ -15,3 +15,4 @@ KALA
 
 AAPL
 NVO
+MSFT
