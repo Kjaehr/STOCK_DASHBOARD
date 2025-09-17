@@ -349,6 +349,27 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
         titles_30: list[str] = []
 
         entries = getattr(d, "entries", None) or []
+        # Fallback: if Google returns no entries, try Bing News RSS
+        if not entries:
+            try:
+                from urllib.parse import quote_plus
+                q = quote_plus(f"{symbol} stock OR {label} stock")
+                b_url = f"https://www.bing.com/news/search?q={q}&format=RSS&cc=US&setlang=en-US"
+                try:
+                    from urllib.request import Request, urlopen  # type: ignore
+                    req2 = Request(b_url, headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 StockDashBot/1.0",
+                        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.7",
+                    })
+                    with urlopen(req2, timeout=20) as resp2:
+                        content2 = resp2.read()
+                    d2 = feedparser.parse(content2)
+                except Exception:
+                    d2 = feedparser.parse(b_url)
+                entries = getattr(d2, "entries", None) or []
+            except Exception:
+                entries = entries
         for e in entries:
             # title can be str or list fragments
             title_raw = e.get("title", "") if hasattr(e, "get") else getattr(e, "title", "")
