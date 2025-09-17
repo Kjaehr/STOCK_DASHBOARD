@@ -10,6 +10,7 @@ import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from '.
 import { Switch } from './ui/switch'
 import { Badge } from './ui/badge'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
+import { ArrowUpDown } from 'lucide-react'
 
 const META_CACHE_KEY = 'stockdash:meta'
 const LIST_CACHE_KEY = 'stockdash:leaderboard'
@@ -55,6 +56,13 @@ export default function Leaderboard() {
   const [onlyPriced, setOnlyPriced] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
+
+  type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'score', dir: 'desc' })
+  function toggleSort(key: SortKey) {
+    setSort(s => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'ticker' ? 'asc' : 'desc' })
+  }
+
   const [newTicker, setNewTicker] = useState('')
 
   useEffect(() => {
@@ -127,8 +135,26 @@ export default function Leaderboard() {
         return typeof atr === 'number' && atr > 0 && atr < 8
       })
     }
-    return arr.sort((a,b) => (b.score ?? 0) - (a.score ?? 0))
-  }, [items, q, preset, onlyPriced])
+    return arr.sort((a,b) => {
+      const dir = sort.dir === 'asc' ? 1 : -1
+      const getVal = (x: StockData) => {
+        switch (sort.key) {
+          case 'ticker': return (x.ticker ?? '').toLowerCase()
+          case 'price': return x.price ?? -Infinity
+          case 'fund': return x.fund_points ?? -Infinity
+          case 'tech': return x.tech_points ?? -Infinity
+          case 'sent': return x.sent_points ?? -Infinity
+          case 'score':
+          default: return x.score ?? -Infinity
+        }
+      }
+      const va = getVal(a); const vb = getVal(b)
+      if (typeof va === 'string' && typeof vb === 'string') return va.localeCompare(vb) * dir
+      const na = Number(va ?? -Infinity); const nb = Number(vb ?? -Infinity)
+      if (na === nb) return 0
+      return na > nb ? 1*dir : -1*dir
+    })
+  }, [items, q, preset, onlyPriced, sort])
 
   function addToPortfolio(t: string, price?: number | null) {
     try {
@@ -190,15 +216,27 @@ export default function Leaderboard() {
       {error ? <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">{error}</div> : null}
 
       <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
-        <Table className="w-full text-sm">{/* Table */}
+        <Table className="w-full text-sm min-w-[900px]">{/* Table */}
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
             <TableRow className="hover:bg-transparent">
-              <TableHead className="whitespace-nowrap">Ticker</TableHead>
-              <TableHead className="whitespace-nowrap">Score</TableHead>
-              <TableHead className="text-right whitespace-nowrap">Price</TableHead>
-              <TableHead className="text-right whitespace-nowrap">Fund</TableHead>
-              <TableHead className="text-right whitespace-nowrap">Tech</TableHead>
-              <TableHead className="text-right whitespace-nowrap">Sent</TableHead>
+              <TableHead className="whitespace-nowrap sticky left-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                <button onClick={()=>toggleSort('ticker')} className="inline-flex items-center gap-1">Ticker <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="whitespace-nowrap">
+                <button onClick={()=>toggleSort('score')} className="inline-flex items-center gap-1">Score <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('price')} className="inline-flex items-center gap-1">Price <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('fund')} className="inline-flex items-center gap-1">Fund <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('tech')} className="inline-flex items-center gap-1">Tech <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
               <TableHead className="whitespace-nowrap">Flags</TableHead>
               <TableHead className="text-right" />
             </TableRow>
@@ -206,7 +244,7 @@ export default function Leaderboard() {
           <TableBody>
             {filtered.map(row => (
               <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
-                <TableCell className="font-medium">{row.ticker}</TableCell>
+                <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{row.ticker}</TableCell>
                 <TableCell>
                   <Badge className={scoreBadgeClass(row.score)}>{row.score ?? 0}</Badge>
                 </TableCell>

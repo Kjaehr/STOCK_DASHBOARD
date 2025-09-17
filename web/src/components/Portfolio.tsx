@@ -8,6 +8,7 @@ import { Input } from './ui/input'
 import { Button } from './ui/button'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
 import { Badge } from './ui/badge'
+import { ArrowUpDown } from 'lucide-react'
 
 type Holding = { ticker: string; qty: number; avgCost: number }
 
@@ -81,6 +82,12 @@ export default function Portfolio() {
   const [loading, setLoading] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
 
+  type SortKey = 'ticker'|'qty'|'avgCost'|'price'|'value'|'gain'|'gainPct'|'score'
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'value', dir: 'desc' })
+  function toggleSort(key: SortKey) {
+    setSort(s => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'ticker' ? 'asc' : 'desc' })
+  }
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_KEY)
@@ -130,6 +137,29 @@ export default function Portfolio() {
     const totalValue = rows.reduce((a, r) => a + (r.value ?? 0), 0)
     return { totalValue }
   }, [rows])
+
+  const sortedRows = useMemo(() => {
+    const dir = sort.dir === 'asc' ? 1 : -1
+    const getVal = (x: any) => {
+      switch (sort.key) {
+        case 'ticker': return (x.ticker ?? '').toLowerCase()
+        case 'qty': return x.qty ?? -Infinity
+        case 'avgCost': return x.avgCost ?? -Infinity
+        case 'price': return x.price ?? -Infinity
+        case 'value': return x.value ?? -Infinity
+        case 'gain': return x.gain ?? -Infinity
+        case 'gainPct': return x.gainPct ?? -Infinity
+        case 'score': default: return x.score ?? -Infinity
+      }
+    }
+    return [...rows].sort((a,b) => {
+      const va = getVal(a); const vb = getVal(b)
+      if (typeof va === 'string' && typeof vb === 'string') return va.localeCompare(vb) * dir
+      const na = Number(va ?? -Infinity); const nb = Number(vb ?? -Infinity)
+      if (na === nb) return 0
+      return na > nb ? 1*dir : -1*dir
+    })
+  }, [rows, sort])
 
   function addHolding() {
     const t = form.ticker.trim().toUpperCase()
@@ -209,24 +239,40 @@ export default function Portfolio() {
       </div>
 
       <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
-        <Table className="w-full text-sm">
+        <Table className="w-full text-sm min-w-[900px]">
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
             <TableRow className="hover:bg-transparent">
-              <TableHead>Ticker</TableHead>
-              <TableHead className="text-right">Qty</TableHead>
-              <TableHead className="text-right">Avg cost</TableHead>
-              <TableHead className="text-right">Price</TableHead>
-              <TableHead className="text-right">Value</TableHead>
-              <TableHead className="text-right">Gain</TableHead>
-              <TableHead className="text-right">Gain %</TableHead>
-              <TableHead className="text-right">Score</TableHead>
+              <TableHead className="sticky left-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                <button onClick={()=>toggleSort('ticker')} className="inline-flex items-center gap-1">Ticker <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('qty')} className="inline-flex items-center gap-1">Qty <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('avgCost')} className="inline-flex items-center gap-1">Avg cost <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('price')} className="inline-flex items-center gap-1">Price <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('value')} className="inline-flex items-center gap-1">Value <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('gain')} className="inline-flex items-center gap-1">Gain <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('gainPct')} className="inline-flex items-center gap-1">Gain % <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right">
+                <button onClick={()=>toggleSort('score')} className="inline-flex items-center gap-1">Score <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
               <TableHead className="text-right" />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map(r => (
+            {sortedRows.map(r => (
               <TableRow key={r.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
-                <TableCell className="font-medium">{r.ticker}</TableCell>
+                <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{r.ticker}</TableCell>
                 <TableCell className="text-right tabular-nums">{num(r.qty)}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmt(r.avgCost)}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmt(r.price)}{r.priceFallback ? ' (est)' : ''}</TableCell>
