@@ -453,12 +453,12 @@ function timeAgo(iso?: string) {
 }
 
 
-const btn: React.CSSProperties = { padding:'6px 10px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer' }
-const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fff', cursor:'pointer', borderRadius:6 }
+const btn: React.CSSProperties = { padding:'6px 10px', border:'1px solid #e3e9ff', background:'#f4f7ff', color:'#111', cursor:'pointer', borderRadius:8, fontWeight:600 }
+const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fff', color:'#111', cursor:'pointer', borderRadius:6 }
 
 const card: React.CSSProperties = { padding:12, border:'1px solid #eee', borderRadius:8, background:'#fff' }
 const h3: React.CSSProperties = { margin:'0 0 8px 0', fontSize:14, color:'#444', display:'flex', alignItems:'center', gap:8 }
-const chip: React.CSSProperties = { display:'inline-block', padding:'4px 8px', border:'1px solid #eee', borderRadius:16, fontSize:12 }
+const chip: React.CSSProperties = { display:'inline-block', padding:'4px 8px', border:'1px solid #ccd', background:'#f8fafc', color:'#111', borderRadius:16, fontSize:12 }
 const chipWarn: React.CSSProperties = { ...chip, background:'#fff8e6', borderColor:'#ffe6b3', color:'#8a6d3b' }
 const grid2: React.CSSProperties = { display:'grid', gap:12, gridTemplateColumns:'repeat(auto-fit, minmax(260px, 1fr))' }
 const grid3: React.CSSProperties = { display:'grid', gap:12, gridTemplateColumns:'repeat(auto-fit, minmax(240px, 1fr))' }
