@@ -285,6 +285,25 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     except Exception:
 
         series = {"dates": [], "close": [], "sma50": [], "sma200": [], "rsi": [], "atr_pct": []}
+    # Relative strength vs SPY (optional)
+    rs_ratio = None
+    rs_rising = False
+    try:
+        spy = yf.Ticker("SPY")
+        spy_hist = spy.history(period="1y", interval="1d", auto_adjust=False)
+        if spy_hist is not None and len(spy_hist) and "Close" in spy_hist:
+            spy_close = spy_hist["Close"].astype(float)
+            sc = spy_close.reindex(close.index)
+            try:
+                sc = sc.ffill().bfill()
+            except Exception:
+                pass
+            rs = close / sc
+            rs50 = rs.rolling(50, min_periods=20).mean()
+            rs_rising = bool(rs50.tail(5).mean() > rs50.tail(10).head(5).mean())
+            rs_ratio = float(rs.iloc[-1])
+    except Exception:
+        pass
     return {
         "price": price,
         "sma50": sma50_last,
@@ -294,6 +313,8 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
         "vol20_rising": vol20_rising,
         "price_gt_ma20": price_gt_ma20,
         "series": series,
+        "rs_ratio": rs_ratio,
+        "rs_rising": rs_rising,
     }, flags
 
 def fetch_news_sentiment(label: str, symbol: str) -> dict:
@@ -321,6 +342,7 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
             "gl": "US",
             "ceid": "US:en",
         }
+        source = "google"
         url = "https://news.google.com/rss/search?" + urlencode(params)
 
         # Fetch with explicit User-Agent to avoid bot filtering
@@ -355,6 +377,7 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
                 from urllib.parse import quote_plus
                 q = quote_plus(f"{symbol} stock OR {label} stock")
                 b_url = f"https://www.bing.com/news/search?q={q}&format=RSS&cc=US&setlang=en-US"
+                source = "bing"
                 try:
                     from urllib.request import Request, urlopen  # type: ignore
                     req2 = Request(b_url, headers={
@@ -484,6 +507,8 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
             "flow": flow,
             "signal_terms": has_signal,
             "buckets": {"sent": sent_bucket},
+            "source": source,
+            "entries": int(count30),
         }
     except Exception as _e:
         # On any unexpected error, return a neutral payload instead of raising
@@ -495,6 +520,8 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
             "flow": "low",
             "signal_terms": False,
             "buckets": {"sent": "none"},
+            "source": "none",
+            "entries": 0,
         }
 
 
@@ -927,9 +954,69 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
 
 
 
-    # Weighted total
+    # Compute simple buy zones (ATR/SMA pullbacks + breakout retest)
+    zones: list[dict] = []
+    try:
+        price = tech.get("price")
+        sma50 = tech.get("sma50")
+        atr_pct = tech.get("atr_pct")
+        tm = tech_meta or {}
+        trend = (tm.get("trend") or {}) if isinstance(tm, dict) else {}
+        uptrend = bool(trend.get("close_gt_sma200") and trend.get("sma50_gt_sma200"))
+        atr_abs = (price * (atr_pct / 100.0)) if (isinstance(price,(int,float)) and isinstance(atr_pct,(int,float))) else None
+        series = (tm.get("series") or {}) if isinstance(tm, dict) else {}
+        closes = [float(c) for c in (series.get("close") or []) if isinstance(c,(int,float))]
+        # SMA20 from last 20 closes
+        sma20_last = (sum(closes[-20:]) / 20.0) if len(closes) >= 20 else None
+        # Config overrides for buy zones
+        k50 = 1.0; k20 = 0.8; k_retest_lo = 1.0; k_retest_hi = 0.2
+        try:
+            conf = json.loads((ROOT / "config" / "buyzones.json").read_text(encoding="utf-8"))
+            k50 = float(conf.get("sma50_k_atr", k50))
+            k20 = float(conf.get("sma20_k_atr", k20))
+            k_retest_lo = float(conf.get("retest_k_lo", k_retest_lo))
+            k_retest_hi = float(conf.get("retest_k_hi", k_retest_hi))
+        except Exception:
+            pass
 
-    total = round(0.40 * fund_pts + 0.35 * tech_pts + 0.25 * sent_pts)
+        if uptrend and sma50 is not None and atr_abs is not None:
+            low = max(0.0, float(sma50) - k50 * atr_abs)
+            high = float(sma50)
+            zones.append({"type":"sma_pullback","ma":"SMA50","price_low":round(low,2),"price_high":round(high,2),"confidence":0.7,"rationale":f"Uptrend; pullback to SMA50 ±{k50} ATR"})
+        if uptrend and sma20_last is not None and atr_abs is not None:
+            low = max(0.0, float(sma20_last) - k20 * atr_abs)
+            high = float(sma20_last)
+            zones.append({"type":"sma_pullback","ma":"SMA20","price_low":round(low,2),"price_high":round(high,2),"confidence":0.6,"rationale":f"Uptrend; pullback to SMA20 ±{k20} ATR"})
+        # Breakout retest: prior recent high (exclude last 5 days)
+        recent_high = None
+        if len(closes) >= 30:
+            look = min(60, len(closes)-5)
+            prior = closes[-(look+5):-5]
+            if prior:
+                recent_high = max(prior)
+        if uptrend and recent_high is not None and atr_abs is not None and isinstance(price,(int,float)) and price > recent_high:
+            pl = max(0.0, recent_high - k_retest_lo * atr_abs)
+            ph = max(0.0, recent_high - k_retest_hi * atr_abs)
+            zones.append({"type":"breakout_retest","level":round(float(recent_high),2),"price_low":round(pl,2),"price_high":round(ph,2),"confidence":0.6,"rationale":"Retest of recent resistance"})
+    except Exception:
+        zones = []
+
+    # Weighted total (configurable via config/weights.json)
+    _w = {"fundamentals": 0.40, "technicals": 0.35, "sentiment": 0.25}
+    try:
+        _w_conf = json.loads((ROOT / "config" / "weights.json").read_text(encoding="utf-8"))
+        for k in ("fundamentals","technicals","sentiment"):
+            if k in _w_conf:
+                _w[k] = float(_w_conf[k])
+    except Exception:
+        pass
+    _sum = sum([_w.get("fundamentals",0.0), _w.get("technicals",0.0), _w.get("sentiment",0.0)])
+    if _sum <= 0:
+        _sum = 1.0
+    wf = _w.get("fundamentals",0.0) / _sum
+    wt = _w.get("technicals",0.0) / _sum
+    ws = _w.get("sentiment",0.0) / _sum
+    total = round(wf * fund_pts + wt * tech_pts + ws * sent_pts)
 
 
 
@@ -950,6 +1037,7 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
         "technicals": {**tech_meta},
 
         "sentiment": {**sent_meta},
+        "buy_zones": zones,
 
         "price": tech.get("price"),
 

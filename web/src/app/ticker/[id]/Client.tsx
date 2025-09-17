@@ -354,6 +354,20 @@ export default function TickerClient({ id }: { id: string }) {
 
       <div style={grid3}>{/* Metrics cards */}
         <div style={card}>
+          <h3 style={h3}>Buy Box</h3>
+          <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
+            {(((data as any)?.buy_zones as any[]) || []).map((z: any, i: number) => (
+              <span key={i} style={chip} title={z?.rationale || ''}>
+                {z?.type === 'sma_pullback' ? `${z?.ma ?? 'SMA'}: ${fmt(z?.price_low)}–${fmt(z?.price_high)}` :
+                 z?.type === 'breakout_retest' ? `Retest: ${fmt(z?.price_low)}–${fmt(z?.price_high)}` :
+                 `${z?.type ?? 'zone'}: ${fmt(z?.price_low)}–${fmt(z?.price_high)}`}
+              </span>
+            ))}
+            {(!(((data as any)?.buy_zones as any[]) || []).length) ? <small style={{color:'#666'}}>Ingen købszoner endnu</small> : null}
+          </div>
+        </div>
+
+        <div style={card}>
           <h3 style={h3}>Fundamentals <span style={scoreTag}>{data?.fund_points ?? 0}/40</span></h3>
           <div style={grid2min}>{fundamentalRows.map(row => (
             <Metric key={row.label} label={row.label} value={row.value} points={row.points} max={row.max} hint={row.hint} />
@@ -437,6 +451,7 @@ function timeAgo(iso?: string) {
   const days = Math.floor(hrs / 24)
   return `${days}d ago`
 }
+
 
 const btn: React.CSSProperties = { padding:'6px 10px', border:'1px solid #ddd', background:'#fafafa', cursor:'pointer' }
 const btnMini: React.CSSProperties = { padding:'4px 8px', border:'1px solid #ddd', background:'#fff', cursor:'pointer', borderRadius:6 }

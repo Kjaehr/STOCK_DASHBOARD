@@ -1,0 +1,7 @@
+{
+  "sma50_k_atr": 1.0,
+  "sma20_k_atr": 0.8,
+  "retest_k_lo": 1.0,
+  "retest_k_hi": 0.2
+}
+

@@ -441,3 +441,90 @@ Repo Settings → Pages → set build output folder (see section 8).
 
 - Deploy/UI verifikation
   - Efter build/export: åben Pages-URL og valider at: 1) `/data/meta.json` kan hentes, 2) farver/kontraster er korrekte i både lys/mørk tilstand, 3) tabel er responsiv (mobil/desktop).
+
+
+## 17) Forbedringer til aktievurdering og købszoner (praktiske forslag)
+
+Formål: Hurtigt vurdere en potentiel aktie og få konkrete købszoner/prisområder, hvor det statistisk giver bedst mening at akkumulere.
+
+A) Fundamentale forbedringer (bedre kvalitet/valuation signaler)
+- Sektorspecifikke tærskler: Justér FCF-yield, marginer og vækstkrav pr. sektor (Tech vs. Consumer vs. Industrials) og pr. market-cap (mega/large/mid/small).
+- Kvalitet og kapitalallokering:
+  - ROIC/CROIC (hvis tilgængeligt), FCF-margin, netto-margin-trend (3–5Y), operating leverage (ΔEBIT/ΔRevenue).
+  - Dilution: aktieantal 3–5Y (udvanding) og SBC% af omsætning.
+  - Earnings quality: accruals (NI – CFO), CFO/NI-ratio, stabilitet i CFO.
+- Balance: Net cash/EBITDA, Interest coverage, Current/Quick ratio (faldbak hvis data mangler).
+- Valuation (simple gratis-proxies):
+  - P/FCF, EV/EBIT(DA), P/E (normaliser med 3–5Y medianer når muligt).
+  - PEG-approx (P/E vs. vækst), Rule of 40 for software (vækst% + FCF-margin%).
+  - Reverse DCF-lite: “krævet CAGR for at retfærdiggøre prisen” → lavt krav = bedre.
+- Stabilitet: Varians i marginer/vækst over 3–5Y (jo lavere varians, jo højere stabilitetspoint).
+
+B) Tekniske forbedringer (regime og kontekst til køb)
+- Trend-regime: Klassificér som Uptrend (Close>SMA200 & SMA50>SMA200), Basing/Sideways, Downtrend.
+- Relativ styrke: Prisratio vs. relevant sektor-ETF (fx MSFT/SPY eller XLK) – stigende ratio = +point.
+- 52-ugers position: Afstand til 52w high/low; aktier tæt på 52w high i uptrend får bonus; dybe drawdowns i downtrend straffes.
+- Volumenmønstre: Breakout med volumen over 20/50-dages gennemsnit, eller “volume shelf” konsolidering.
+- ATR-/Keltner-bånd: Brug ATR% dynamisk for at vurdere “kvalitet” af trend og definere pullback-zoner.
+- Enkle mønster-signaler: Golden/Death cross (SMA50↔SMA200), Higher Highs/Lows-count, mean reversion opsætning i stærk uptrend.
+
+C) Sentiment/nyheder (robusthed og signaler)
+- Kilder: Google + Bing + evt. RSS fra udvalgte finansmedier; deduplikér overskrifter.
+- NER/event-detektion (simpelt lexicon): markér “guidance raise/cut”, “contract award”, “M&A”, “product launch”, “downgrade/upgrade”.
+- Flow normalisering: Justér for ticker-popularitet (rolling baseline) så spikes vægtes korrekt.
+- Polaritet og usikkerhed: Udvid VADER med leksika for guidance/earnings (simpelt ordsæt), lav bucket “pos/neu/neg/uncertain”.
+
+D) Købszoner (prisområder der foreslås i JSON)
+- Trend-baserede zoner (når Uptrend):
+  - Pullback til SMA20/50: Zone = [SMA20 − k·ATR, SMA20] eller [SMA50 − k·ATR, SMA50], typisk k∈[0.5,1.5].
+  - Retest af breakout: Seneste modstand → støtte; definer zone ±x% eller ±y·ATR omkring det niveau.
+- Range/basing: Identificér range-high/low de sidste N dage; køb nær range-low hvis volumen falder ind i bunden og RS forbedres.
+- Valuation-baserede zoner:
+  - “Fair value”-interval fra simple multiples (fx blanding af (historisk median EV/EBIT, P/FCF) → prisinterval), og en “margin of safety” (fx 15–30%).
+  - Reverse-DCF check: vis prisområde, hvor krævet vækst ≤ valgt tærskel (fx 8–10%).
+- JSON-felter (nye):
+  - buy_zones: [ { type: "sma_pullback"|"breakout_retest"|"valuation", price_low, price_high, confidence, rationale } ]
+  - fair_value: { low, base, high, method }
+  - risk: { atr_pct, dd_52w, beta? } og quality: { roic?, stability? }
+
+E) UI/UX (hurtig beslutningsstøtte)
+- “Why this score?”-tooltip per sektion: Vis pointbidrag pr. del-metric.
+- “Buy Box” på details: Tydelige grønne zoner på prisgrafen + chips med prisintervaller og forklaring.
+- Slider/toggles: Vælg “konservativ/neutral/aggressiv” profil → påvirker margin-of-safety og k-parametre for ATR-zoner.
+- Alerts/badges: “Price entered buy zone” (client-side) + “Breakout with volume” badge.
+- Relative strength mini-chart (ticker vs. sektor-ETF) og 52w distance indicator.
+
+F) Konfiguration og skalering (uden server)
+- Filbaseret config i repo: `config/weights.json`, `config/sector_thresholds.json`, `config/buyzones.json` (k, lookbacks, MoS%).
+- Flag og schema: `schema_version`, `flags`, `data_quality`, samt logging af entries og kilder i CI-output for sporbarhed.
+- Fallback-strategi: Hvis enkelte felter mangler (mikrocap), vis “partial confidence” men hold købszoner når tekniske data findes.
+
+G) Verifikation, kalibrering og (enkel) backtest
+- Simpel regelsbaseret backtest på daglige data: Køb når pris krydser ind i en aktiv “buy zone” i Uptrend og sælg ved (a) +10–20% mål, (b) ud af Uptrend, (c) 2×ATR stop.
+- Evaluer hit-rate, gennemsnitligt afkast, max drawdown pr. strategi; justér k-parametre og MoS for bedste trade-off.
+- Rapportér kalibrering i README (kort) og gem parametre i `config/`.
+
+H) Konkrete næste skridt (1–2 uger)
+1) Tilføj JSON-felter og UI-“Buy Box”: implementér ATR/SMA pullback-zoner og breakout-retests; vis dem i graf og som chips.
+2) Tilføj relative strength og 52w-distance i technicals + vis indikator i UI.
+3) Indfør `config/weights.json` og `config/buyzones.json` med profiler (konservativ/neutral/aggressiv).
+4) Udvid sentiment-lexicon og log “entries=<n>, source=Google|Bing” pr. ticker i CI, for bedre observability.
+5) (Valuation, trin 1) P/FCF og EV/EBIT median vs. nu → simpelt fair value-interval + MoS → generér valuation-zone.
+6) (Kalibrering) En mini-backtest pr. strategi (ATR-pullback, breakout-retest) for 10–20 tickers over 1–2 år, og tilret k/MoS.
+
+Output/JSON (eksempel):
+
+```
+{
+  "buy_zones": [
+    { "type": "sma_pullback", "price_low": 385.0, "price_high": 395.0, "confidence": 0.7, "rationale": "Uptrend; pullback til SMA50 ± 1.0 ATR" },
+    { "type": "breakout_retest", "price_low": 412.0, "price_high": 416.0, "confidence": 0.6, "rationale": "Retest af modstand fra 52w-high; volumen normaliseret" },
+    { "type": "valuation", "price_low": 360.0, "price_high": 380.0, "confidence": 0.5, "rationale": "P/FCF & EV/EBIT ~ 5Y median − 20% MoS" }
+  ],
+  "fair_value": { "low": 370.0, "base": 395.0, "high": 430.0, "method": "median multiples" },
+  "risk": { "atr_pct": 2.8, "dd_52w": 12.5 },
+  "quality": { "stability": 0.8 }
+}
+```
+
+Noter (gratis/fri-tier): Vi forbliver inden for yfinance + RSS. Hvor data mangler, bruger vi konservative defaults og tydelige flags. Ingen tredjeparts betalte APIs.
