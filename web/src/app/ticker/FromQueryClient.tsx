@@ -1,9 +1,10 @@
 "use client"
+import { Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import TickerClient from './[id]/Client'
 import { BASE } from '../../base'
 
-export default function TickerFromQuery() {
+function Inner() {
   const sp = useSearchParams()
   const idParam = sp?.get('id') || ''
   const id = idParam ? decodeURIComponent(idParam) : ''
@@ -19,5 +20,13 @@ export default function TickerFromQuery() {
   }
 
   return <TickerClient id={id} />
+}
+
+export default function TickerFromQuery() {
+  return (
+    <Suspense fallback={<section style={{ padding: 16 }}>Loading…</section>}>
+      <Inner />
+    </Suspense>
+  )
 }
 
