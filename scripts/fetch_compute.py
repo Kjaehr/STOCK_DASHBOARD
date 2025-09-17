@@ -10,10 +10,10 @@ Next steps (replace stubs with real data):
 - Sentiment via RSS (feedparser) + VADER
 - Fundamentals via yfinance.Ticker.info or alternative sources
 - Map metrics to points per README and compute total score
-
-This script is intentionally robust and idempotent: it skips bad tickers,
-creates the /data directory if needed, and continues on errors.
 """
+
+import sys
+
 from __future__ import annotations
 import json
 import os
@@ -1057,6 +1057,145 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
 
 
 
+
+
+def _sma(arr: list[float], window: int) -> list[float]:
+    out: list[float] = []
+    s = 0.0
+    q: list[float] = []
+    for x in arr:
+        q.append(x); s += x
+        if len(q) > window:
+            s -= q.pop(0)
+        out.append(s / len(q))
+    return out
+
+
+def _backtest_buyzones_from_series(series: dict, conf: dict | None = None) -> dict:
+    # Inputs
+    dates = series.get("dates") or []
+    closes_raw = series.get("close") or []
+    sma50_raw = series.get("sma50") or []
+    sma200_raw = series.get("sma200") or []
+    atr_pct_raw = series.get("atr_pct") or []
+    # Cast and clean
+    closes: list[float] = [float(c) for c in closes_raw if c is not None]
+    # Align lengths by index
+    n = min(len(dates), len(closes_raw), len(sma50_raw), len(sma200_raw), len(atr_pct_raw))
+    if n < 60:
+        return {"trades": 0, "hit_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0}
+    closes = [float(closes_raw[i]) if closes_raw[i] is not None else None for i in range(n)]  # type: ignore
+    sma50 = [float(sma50_raw[i]) if sma50_raw[i] is not None else None for i in range(n)]  # type: ignore
+    sma200 = [float(sma200_raw[i]) if sma200_raw[i] is not None else None for i in range(n)]  # type: ignore
+    atrp = [float(atr_pct_raw[i]) if atr_pct_raw[i] is not None else None for i in range(n)]  # type: ignore
+    # SMA20 from closes
+    closes_num: list[float] = [c for c in closes if isinstance(c, (int, float))]
+    if not closes_num:
+        return {"trades": 0, "hit_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0}
+    sma20 = _sma([float(c) if c is not None else closes_num[-1] for c in closes], 20)
+    # Config
+    k50 = 1.0; k20 = 0.8; k_retest_lo = 1.0; k_retest_hi = 0.2
+    if conf:
+        k50 = float(conf.get("sma50_k_atr", k50))
+        k20 = float(conf.get("sma20_k_atr", k20))
+        k_retest_lo = float(conf.get("retest_k_lo", k_retest_lo))
+        k_retest_hi = float(conf.get("retest_k_hi", k_retest_hi))
+    # Walk and simulate
+    horizon = 10
+    rets: list[float] = []
+    for i in range(50, n - horizon - 1):
+        c = closes[i]
+        if c is None: continue
+        s50 = sma50[i]; s200 = sma200[i]; ap = atrp[i]
+        if s50 is None or s200 is None or ap is None: continue
+        uptrend = (c > s200) and (s50 > s200)
+        if not uptrend: continue
+        atr_abs = c * (ap / 100.0)
+        if not atr_abs or atr_abs <= 0: continue
+        # Zones for this bar
+        zones: list[tuple[float, float]] = []
+        zones.append((max(0.0, s50 - k50 * atr_abs), s50))
+        s20 = sma20[i]
+        if s20:
+            zones.append((max(0.0, s20 - k20 * atr_abs), s20))
+        # Retest based on prior high (simple heuristic)
+        prior = [cl for cl in closes[max(0, i-60):i-5] if isinstance(cl, (int, float))]
+        if prior:
+            recent_high = max(prior)
+            if c > recent_high:
+                pl = max(0.0, recent_high - k_retest_lo * atr_abs)
+                ph = max(0.0, recent_high - k_retest_hi * atr_abs)
+                zones.append((pl, ph))
+        # Look forward for touch and outcome
+        for (lo, hi) in zones:
+            entry_idx = None
+            entry = None
+            for j in range(i + 1, min(i + horizon + 1, n)):
+                cj = closes[j]
+                if cj is None: continue
+                if lo <= cj <= hi:
+                    entry = cj
+                    entry_idx = j
+                    break
+            if entry is None or entry_idx is None: continue
+            exit_idx = min(entry_idx + horizon, n - 1)
+            exit_px = closes[exit_idx]
+            if exit_px is None: continue
+            ret = (exit_px - entry) / entry
+            rets.append(ret)
+    if not rets:
+        return {"trades": 0, "hit_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "expectancy": 0.0}
+    wins = [r for r in rets if r > 0]
+    losses = [r for r in rets if r <= 0]
+    hit = (len(wins) / len(rets)) if rets else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    expectancy = hit * avg_win + (1 - hit) * avg_loss
+    return {"trades": len(rets), "hit_rate": hit, "avg_win": avg_win, "avg_loss": avg_loss, "expectancy": expectancy}
+
+
+def run_backtest(tickers: list[str]) -> int:
+    print("Running mini-backtest across", len(tickers), "tickers...")
+    try:
+        conf = json.loads((ROOT / "config" / "buyzones.json").read_text(encoding="utf-8"))
+    except Exception:
+        conf = {}
+    total = {"trades": 0, "hit_rate_sum": 0.0, "avg_win_sum": 0.0, "avg_loss_sum": 0.0, "expectancy_sum": 0.0, "n": 0}
+    for label in tickers:
+        try:
+            tech, _ = run_with_retry(lambda: compute_indicators(label), attempts=2, base_delay=3.0, label=f"indicators:{label}")
+            series = (tech.get("series") or {}) if isinstance(tech, dict) else {}
+            if not series:
+                print(f"{label:>8}: no series")
+                continue
+            res = _backtest_buyzones_from_series(series, conf)
+            if res["trades"] == 0:
+                print(f"{label:>8}: trades=0")
+                continue
+            total["trades"] += res["trades"]
+            total["hit_rate_sum"] += res["hit_rate"]
+            total["avg_win_sum"] += res["avg_win"]
+            total["avg_loss_sum"] += res["avg_loss"]
+            total["expectancy_sum"] += res["expectancy"]
+            total["n"] += 1
+            print(f"{label:>8}: trades={res['trades']:3d} hit={res['hit_rate']*100:5.1f}% avgW={res['avg_win']*100:5.1f}% avgL={res['avg_loss']*100:5.1f}% exp={res['expectancy']*100:5.1f}%")
+        except Exception as e:
+            print(f"{label:>8}: ERROR {e.__class__.__name__}")
+            continue
+    if total["n"]:
+        agg = {
+            "trades": total["trades"],
+            "hit_rate": total["hit_rate_sum"] / total["n"],
+            "avg_win": total["avg_win_sum"] / total["n"],
+            "avg_loss": total["avg_loss_sum"] / total["n"],
+            "expectancy": total["expectancy_sum"] / total["n"],
+        }
+        print("\nSummary:")
+        print(f" tickers={total['n']} trades={agg['trades']} hit={agg['hit_rate']*100:5.1f}% avgW={agg['avg_win']*100:5.1f}% avgL={agg['avg_loss']*100:5.1f}% exp={agg['expectancy']*100:5.1f}%")
+    else:
+        print("No trades across universe.")
+    return 0
+
 def main() -> int:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1065,10 +1204,16 @@ def main() -> int:
 
     tickers = read_tickers(TICKERS_FILE)
 
+    # Mini-backtest mode
+    args = set(sys.argv[1:])
+    if "--backtest" in args or "-B" in args:
+        if not tickers:
+            print(f"No tickers found in {TICKERS_FILE}.")
+            return 0
+        return run_backtest(tickers)
+
     if not tickers:
-
         print(f"No tickers found in {TICKERS_FILE}. Create the file with one ticker per line.")
-
         return 0
 
 

@@ -150,6 +150,9 @@ export default function TickerClient({ id }: { id: string }) {
   const [usingCache, setUsingCache] = useState(false)
   const [metaCached, setMetaCached] = useState(false)
 
+  // RS vs SPY state
+  const [spySeries, setSpySeries] = useState<{dates:string[]; close:(number|null)[]} | null>(null)
+
   async function refreshMeta(force = false) {
     if (typeof window === 'undefined') return
     const cached = readCache<StockMeta>(META_CACHE_KEY)
@@ -264,6 +267,68 @@ export default function TickerClient({ id }: { id: string }) {
   const rsiArr: Array<number|null> = slicer(series.rsi)
   const atrArr: Array<number|null> = slicer(series.atr_pct)
 
+  // RS vs SPY: fetch and compute when we have labels
+  useEffect(() => {
+    let active = true
+    async function loadSpy() {
+      try {
+        const spy = await fetch(`${DATA_BASE}/SPY.json`).then(r => r.ok ? r.json() : null)
+        const s = (spy as any)?.technicals?.series
+        if (s && Array.isArray(s.dates) && Array.isArray(s.close)) {
+          if (active) setSpySeries({ dates: s.dates as string[], close: s.close as (number|null)[] })
+        } else {
+          if (active) setSpySeries(null)
+        }
+      } catch {
+        if (active) setSpySeries(null)
+      }
+    }
+    if (labels.length) loadSpy()
+    return () => { active = false }
+  }, [labels])
+
+  const rsSeriesPct: (number|null)[] = useMemo(() => {
+    if (!spySeries || !labels.length) return []
+    const spyMap = new Map<string, number>()
+    spySeries.dates.forEach((d, idx) => {
+      const v = spySeries.close[idx]
+      if (typeof v === 'number') spyMap.set(d, v)
+    })
+    const tickerVals: number[] = []
+    const spyVals: number[] = []
+    labels.forEach((d, i) => {
+      const t = priceClose[i]
+      const s = spyMap.get(d)
+      if (typeof t === 'number' && typeof s === 'number') { tickerVals.push(t); spyVals.push(s) }
+    })
+    if (tickerVals.length < 10) return []
+    const t0 = tickerVals[0]
+    const s0 = spyVals[0]
+    if (!t0 || !s0) return []
+    const pct: number[] = []
+    let idxJ = 0
+    labels.forEach((d, i) => {
+      const t = priceClose[i]
+      const s = spyMap.get(d)
+      if (typeof t === 'number' && typeof s === 'number') {
+        const rel = (t / t0) / (s / s0) - 1
+        pct.push(rel * 100)
+        idxJ++
+      } else {
+        pct.push(null as any)
+      }
+    })
+    return pct
+  }, [spySeries, labels, priceClose])
+
+  const rsNow = useMemo(() => {
+    const vals = rsSeriesPct.filter(v => typeof v === 'number') as number[]
+    return vals.length ? vals[vals.length - 1] : null
+  }, [rsSeriesPct])
+
+  const rsAccent = rsNow == null ? '#222' : rsNow >= 0 ? '#216e39' : '#a94442'
+  const rsSummary = rsNow == null ? '--' : `${rsNow >= 0 ? '+' : ''}${rsNow.toFixed(1)}% vs SPY`
+
   const fundamentalRows = useMemo(() => ([
     { label: 'FCF Yield', value: fmtPercent(F?.fcf_yield), ...evalFcfYield(F?.fcf_yield) },
     { label: 'NetDebt/EBITDA', value: fmt(F?.nd_to_ebitda), ...evalNetDebt(F?.nd_to_ebitda) },
@@ -340,7 +405,7 @@ export default function TickerClient({ id }: { id: string }) {
           )}
           {labels.length ? (
             <div style={{height:160, marginTop:8}}>{/* Price chart */}
-              <PriceChart labels={labels} close={priceClose} sma50={priceSMA50} sma200={priceSMA200} />
+              <PriceChart labels={labels} close={priceClose} sma50={priceSMA50} sma200={priceSMA200} zones={(data as any)?.buy_zones} />
             </div>
           ) : null}
         </div>
@@ -357,7 +422,11 @@ export default function TickerClient({ id }: { id: string }) {
           <h3 style={h3}>Buy Box</h3>
           <div style={{display:'flex', gap:8, flexWrap:'wrap'}}>
             {(((data as any)?.buy_zones as any[]) || []).map((z: any, i: number) => (
-              <span key={i} style={chip} title={z?.rationale || ''}>
+              <span
+                key={i}
+                style={{...chip, ...(rsNow == null ? {} : rsNow >= 0 ? { background:'#eef9f0', borderColor:'#c8efd2', color:'#216e39' } : { background:'#fff5f5', borderColor:'#ffd6d6', color:'#a94442' })}}
+                title={z?.rationale || ''}
+              >
                 {z?.type === 'sma_pullback' ? `${z?.ma ?? 'SMA'}: ${fmt(z?.price_low)}–${fmt(z?.price_high)}` :
                  z?.type === 'breakout_retest' ? `Retest: ${fmt(z?.price_low)}–${fmt(z?.price_high)}` :
                  `${z?.type ?? 'zone'}: ${fmt(z?.price_low)}–${fmt(z?.price_high)}`}
@@ -379,6 +448,7 @@ export default function TickerClient({ id }: { id: string }) {
             <Metric label="RSI(14)" value={fmt(T?.rsi)} accent={rsiColor(T?.rsi)} points={rsiEval.points} max={rsiEval.max} hint={rsiEval.hint} />
             <Metric label="ATR%" value={fmtPercentDirect(T?.atr_pct)} points={atrEval.points} max={atrEval.max} hint={atrEval.hint} />
             <Metric label="Volume confirm" value={volumeEval.value} points={volumeEval.points} max={volumeEval.max} hint={volumeEval.hint} />
+            <Metric label="RS vs SPY" value={rsSummary} accent={rsNow == null ? undefined : (rsNow >= 0 ? '#216e39' : '#a94442')} hint="Outperformance relative to SPY over selected range" />
           </div>
           {rsiArr.length ? (
             <div style={{height:120, marginTop:8}}>{/* RSI chart */}
@@ -388,6 +458,11 @@ export default function TickerClient({ id }: { id: string }) {
           {atrArr.length ? (
             <div style={{height:120, marginTop:8}}>{/* ATR chart */}
               <LineChart labels={labels} data={atrArr} label="ATR%" color="#3182ce" />
+            </div>
+          ) : null}
+          {rsSeriesPct.length ? (
+            <div style={{height:120, marginTop:8}}>{/* RS vs SPY chart */}
+              <LineChart labels={labels} data={rsSeriesPct as any} label="RS vs SPY (%)" color={rsNow == null ? '#718096' : (rsNow >= 0 ? '#38a169' : '#e53e3e')} />
             </div>
           ) : null}
         </div>
