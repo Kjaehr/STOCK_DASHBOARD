@@ -294,7 +294,7 @@ export default function Leaderboard() {
                   })()}
                 </TableCell>
                 <TableCell className="text-right space-x-2 whitespace-nowrap">
-                  <a className="underline underline-offset-2" href={`${BASE}/ticker/${encodeURIComponent(row.ticker)}`}>Details</a>
+                  <a className="underline underline-offset-2" href={`${BASE}/ticker?id=${encodeURIComponent(row.ticker)}`}>Details</a>
                   <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
                 </TableCell>
               </TableRow>

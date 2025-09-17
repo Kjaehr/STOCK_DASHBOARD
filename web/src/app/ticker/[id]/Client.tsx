@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { StockData, StockMeta } from '../../../types'
 import { PriceChart, LineChart } from '../../../components/Charts'
-import { BASE } from '../../../base'
+import { BASE, DATA_BASE } from '../../../base'
 
 const META_CACHE_KEY = 'stockdash:meta'
 const TICKER_CACHE_PREFIX = 'stockdash:ticker:'
@@ -159,7 +159,7 @@ export default function TickerClient({ id }: { id: string }) {
       if (!force && isFresh(cached)) return
     }
     try {
-      const json = await fetch(`${BASE}/data/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() })
+      const json = await fetch(`${DATA_BASE}/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() })
       setMeta(json)
       setMetaCached(false)
       writeCache(META_CACHE_KEY, json)
@@ -184,7 +184,7 @@ export default function TickerClient({ id }: { id: string }) {
     try {
       setLoading(true)
       setError(null)
-      const json = await fetch(`${BASE}/data/${id.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() })
+      const json = await fetch(`${DATA_BASE}/${id.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() })
       setData(json)
       setUsingCache(false)
       writeCache(key, json)
