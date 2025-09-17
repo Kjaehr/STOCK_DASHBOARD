@@ -387,11 +387,33 @@ def fetch_news_sentiment(label: str, symbol: str) -> dict:
             else:
                 published = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None) or getattr(e, "created_parsed", None)
 
-            try:
-                if not published or not isinstance(published, (tuple, time.struct_time)):
-                    continue
-                pdt = dt.datetime.fromtimestamp(mktime(published))
-            except Exception:
+            # Try to construct a timezone-aware datetime (UTC)
+            pdt = None
+            if published and isinstance(published, (tuple, time.struct_time)):
+                try:
+                    # mktime returns seconds since epoch in local time; interpret and convert explicitly to UTC
+                    ts = mktime(published)
+                    pdt = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
+                except Exception:
+                    pdt = None
+
+            if pdt is None:
+                # Fallback: parse string-based published dates (RFC2822) if available
+                try:
+                    if hasattr(e, "get"):
+                        published_str = e.get("published") or e.get("updated") or e.get("created")
+                    else:
+                        published_str = getattr(e, "published", None) or getattr(e, "updated", None) or getattr(e, "created", None)
+                    if published_str:
+                        from email.utils import parsedate_to_datetime
+                        _tmp = parsedate_to_datetime(str(published_str))
+                        if _tmp is not None:
+                            pdt = _tmp.astimezone(dt.timezone.utc) if _tmp.tzinfo else _tmp.replace(tzinfo=dt.timezone.utc)
+                except Exception:
+                    pdt = None
+
+            if pdt is None:
+                # If we still cannot determine a date, skip this entry conservatively
                 continue
 
             if pdt >= d30:
