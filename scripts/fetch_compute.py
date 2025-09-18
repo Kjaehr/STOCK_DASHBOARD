@@ -267,7 +267,7 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
             raise RuntimeError("yfinance not installed; run: python -m pip install yfinance pandas feedparser vaderSentiment")
         t = yf.Ticker(symbol)
         try:
-            hist = t.history(period="1y", interval="1d", auto_adjust=False)
+            hist = t.history(period="2y", interval="1d", auto_adjust=False)
             provider = "yfinance"
         except Exception as e:
             raise RuntimeError(f"history failed for {symbol}: {e}")
@@ -384,7 +384,7 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
             sc = spy_close.reindex(close.index)
         elif yf is not None:
             spy = yf.Ticker("SPY")
-            spy_hist = spy.history(period="1y", interval="1d", auto_adjust=False)
+            spy_hist = spy.history(period="2y", interval="1d", auto_adjust=False)
             if spy_hist is not None and len(spy_hist) and "Close" in spy_hist:
                 spy_close = spy_hist["Close"].astype(float)
                 sc = spy_close.reindex(close.index)
