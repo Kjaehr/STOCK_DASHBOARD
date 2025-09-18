@@ -6,6 +6,7 @@ export const metadata = {
 import './globals.css'
 import { ThemeProvider } from "../components/theme-provider"
 import { DashboardShell } from "../components/layout/DashboardShell"
+import ChatWidget from "../components/ChatWidget"
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <DashboardShell>
             {children}
           </DashboardShell>
+          <ChatWidget />
         </ThemeProvider>
       </body>
     </html>
