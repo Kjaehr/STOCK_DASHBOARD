@@ -56,6 +56,37 @@ def _ensure_ascii_ca_bundle() -> None:
 
 _ensure_ascii_ca_bundle()
 
+# --- Load .env files locally (simple parser, no dependency) ---
+from pathlib import Path as _Path_env
+
+def _load_env_file_simple(path: _Path_env) -> None:
+    try:
+        if not path.exists():
+            return
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and (k not in os.environ):
+                os.environ[k] = v
+    except Exception:
+        # best-effort: ignore malformed entries
+        pass
+
+# Load root .env and scripts/.env if present
+try:
+    _ROOT_ENV = (_Path_env(__file__).resolve().parents[1] / ".env")
+    _SCRIPTS_ENV = (_Path_env(__file__).resolve().parent / ".env")
+    _load_env_file_simple(_ROOT_ENV)
+    _load_env_file_simple(_SCRIPTS_ENV)
+except Exception:
+    pass
+
 # --- Optional Polygon.io integration (free-tier EOD) ---
 USE_POLYGON = os.getenv("USE_POLYGON", "").strip() == "1"
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") or ""
