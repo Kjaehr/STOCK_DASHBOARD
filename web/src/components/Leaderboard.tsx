@@ -71,7 +71,10 @@ export default function Leaderboard() {
   const [items, setItems] = useState<StockData[]>([])
   const [q, setQ] = useState('')
   const [loading, setLoading] = useState(false)
-  const [preset, setPreset] = useState<'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'>('NONE')
+  const [preset, setPreset] = useState<'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'>(() => {
+    const p = (typeof window !== 'undefined') ? new URLSearchParams(window.location.search).get('p') as ('HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null) : null
+    return (p ?? 'NONE') as 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'
+  })
   const [onlyPriced, setOnlyPriced] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
@@ -112,6 +115,10 @@ export default function Leaderboard() {
   }
 
 
+  // Guard to avoid writing URL before we've initialized from it
+  const readyRef = useRef(false)
+
+
 
   const [newTicker, setNewTicker] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
@@ -148,11 +155,14 @@ export default function Leaderboard() {
     }
     if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
     if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
+    // Mark as ready so URL-writer effect can run
+    readyRef.current = true
   }, [sp])
 
-  // Write state to URL when filters change
+  // Write state to URL when filters change (only after initial URL sync)
   useEffect(() => {
     if (!router || !pathname) return
+    if (!readyRef.current) return
     const params = new URLSearchParams(sp?.toString() || '')
     if (q) params.set('q', q); else params.delete('q')
     if (preset && preset !== 'NONE') params.set('p', preset); else params.delete('p')
