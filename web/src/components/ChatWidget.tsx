@@ -19,11 +19,29 @@ export default function ChatWidget() {
   React.useEffect(() => {
     if (!open || meta) return
     setLoadingMeta(true)
-    fetch('/api/data/meta.json')
-      .then(r => r.json())
-      .then((j: Meta) => setMeta(j))
-      .catch(() => setMeta({ tickers: [] }))
-      .finally(() => setLoadingMeta(false))
+    ;(async () => {
+      const tryFetch = async (url: string) => {
+        const r = await fetch(url)
+        if (!r.ok) throw new Error(String(r.status))
+        return (await r.json()) as Meta
+      }
+      try {
+        let j = await tryFetch('/api/data/meta.json')
+        if (!Array.isArray(j.tickers) || j.tickers.length === 0) {
+          j = await tryFetch('/data/meta.json')
+        }
+        setMeta(j)
+      } catch {
+        try {
+          const j = await tryFetch('/data/meta.json')
+          setMeta(j)
+        } catch {
+          setMeta({ tickers: [] })
+        }
+      } finally {
+        setLoadingMeta(false)
+      }
+    })()
   }, [open, meta])
 
   function toggleTicker(t: string) {
