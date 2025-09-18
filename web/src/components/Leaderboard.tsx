@@ -23,6 +23,23 @@ type CacheRecord<T> = {
   payload: T
 }
 
+function clearCaches() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(META_CACHE_KEY)
+    window.localStorage.removeItem(LIST_CACHE_KEY)
+    // Remove per-ticker caches
+    const keys: string[] = []
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i)
+      if (k && k.startsWith(TICKER_CACHE_PREFIX)) keys.push(k)
+    }
+    keys.forEach(k => window.localStorage.removeItem(k))
+  } catch (e) {
+    console.warn('cache clear failed', e)
+  }
+}
+
 function readCache<T>(key: string): CacheRecord<T> | null {
   if (typeof window === 'undefined') return null
   try {
@@ -76,6 +93,7 @@ export default function Leaderboard() {
   }, [])
 
   async function fetchAll(force = false) {
+    if (force) clearCaches()
     const cachedMeta = readCache<StockMeta>(META_CACHE_KEY)
     const cachedList = readCache<StockData[]>(LIST_CACHE_KEY)
     if (!force) {
@@ -91,12 +109,13 @@ export default function Leaderboard() {
     try {
       setLoading(true)
       setError(null)
-      const metaJson = await fetch(`${DATA_BASE}/meta.json`).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
+      const bust = `?t=${Date.now()}`
+      const metaJson = await fetch(`${DATA_BASE}/meta.json${force ? bust : ''}`, { cache: force ? 'no-store' : 'default' }).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
       setMeta(metaJson)
       writeCache(META_CACHE_KEY, metaJson)
       const tickers = metaJson.tickers ?? []
       const results = await Promise.allSettled(
-        tickers.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
+        tickers.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json${force ? bust : ''}`, { cache: force ? 'no-store' : 'default' }).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
       )
       const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
       setItems(ok)
