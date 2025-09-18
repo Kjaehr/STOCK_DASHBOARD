@@ -6,6 +6,7 @@
     "prepare:dev-data": "node -e \"const fs=require('fs'),p=require('path');const src=p.resolve('..','data');const dst=p.resolve('public','data');fs.mkdirSync('public',{recursive:true});fs.cpSync(src,dst,{recursive:true});console.log('Copied',src,'->',dst);\"",
     "dev": "npm run prepare:dev-data && next dev",
     "build": "next build",
+    "postbuild": "node -e \"require('fs').cpSync('../data','public/data',{recursive:true})\"",
     "start": "next start",
     "lint": "next lint",
     "export": "next build && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\"",

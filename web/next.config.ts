@@ -10,7 +10,7 @@ const distDir = process.env.NEXT_DIST_DIR || path.join(os.tmpdir(), 'stock_dashb
 const root = path.resolve(__dirname, '..')
 
 const nextConfig: NextConfig = {
-  output: 'export',
+  // Server runtime on Vercel (no static export) to enable API routes/middleware
   basePath: base || undefined,
   assetPrefix: base || undefined,
   distDir,
