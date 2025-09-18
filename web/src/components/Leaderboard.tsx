@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import type { StockMeta, StockData } from '../types'
 import { BASE, DATA_BASE } from '../base'
+import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 
 // UI components (shadcn/ui)
 import { Input } from './ui/input'
@@ -75,6 +76,11 @@ export default function Leaderboard() {
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
 
+  // Routing/URL state
+  const router = useRouter()
+  const pathname = usePathname()
+  const sp = useSearchParams()
+
   type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'score', dir: 'desc' })
   function toggleSort(key: SortKey) {
@@ -99,6 +105,34 @@ export default function Leaderboard() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+  // Read state from URL on navigation/back/forward
+  useEffect(() => {
+    const params = new URLSearchParams(sp?.toString() || '')
+    const urlQ = params.get('q') || ''
+    const urlP = (params.get('p') as any) || 'NONE'
+    const urlOP = params.get('op') === '1'
+    const urlS = (params.get('s') as any) || 'score'
+    const urlD = (params.get('d') as any) || 'desc'
+    if (urlQ !== q) setQ(urlQ)
+    if (urlP !== preset) setPreset(urlP)
+    if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
+    if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
+  }, [sp])
+
+  // Write state to URL when filters change
+  useEffect(() => {
+    if (!router || !pathname) return
+    const params = new URLSearchParams(sp?.toString() || '')
+    if (q) params.set('q', q); else params.delete('q')
+    if (preset && preset !== 'NONE') params.set('p', preset); else params.delete('p')
+    if (onlyPriced) params.set('op', '1'); else params.delete('op')
+    const isDefaultSort = sort.key === 'score' && sort.dir === 'desc'
+    if (!isDefaultSort) { params.set('s', sort.key); params.set('d', sort.dir) } else { params.delete('s'); params.delete('d') }
+    const next = `${pathname}${params.toString() ? `?${params.toString()}` : ''}`
+    const current = `${pathname}${sp && sp.toString() ? `?${sp.toString()}` : ''}`
+    if (next !== current) router.replace(next, { scroll: false })
+  }, [q, preset, onlyPriced, sort, pathname, router, sp])
+
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -229,7 +263,17 @@ export default function Leaderboard() {
       <Tooltip.Provider delayDuration={0}>
       <h1 className="text-xl font-semibold">Leaderboard</h1>
       <div className="flex flex-wrap items-center gap-3">{/* Controls */}
-        <Input ref={searchRef} placeholder="Search ticker (/)" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
+        <Input ref={searchRef} placeholder="Search ticker (/)" value={q} onChange={e=>setQ(e.target.value)} className="w-48"
+          onKeyDown={(e)=>{
+            if (e.key === 'Enter') {
+              const s = q.trim().toLowerCase()
+              const exact = filtered.find(x => (x.ticker||'').toLowerCase() === s)?.ticker
+              const first = filtered[0]?.ticker
+              const go = exact || first
+              if (go) window.location.href = `${BASE}/ticker?id=${encodeURIComponent(go)}`
+            }
+          }}
+        />
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
         <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
@@ -273,6 +317,15 @@ export default function Leaderboard() {
           <div className="text-lg font-semibold">{usingCache ? 'Cache' : 'Live'}</div>
         </div>
       </div>
+
+      {/* Empty state when no results */}
+      {!loading && filtered.length === 0 ? (
+        <div className="rounded-md border bg-card/60 backdrop-blur p-6">
+          <h3 className="text-sm font-medium mb-1">No results</h3>
+          <p className="text-sm text-muted-foreground mb-3">Try adjusting search or filters.</p>
+          <Button size="sm" variant="outline" onClick={()=>{ setQ(''); setPreset('NONE'); setOnlyPriced(false); setSort({ key:'score', dir:'desc' }) }}>Reset filters</Button>
+        </div>
+      ) : null}
 
       <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
         <Table className="w-full text-sm min-w-[900px]">{/* Table */}

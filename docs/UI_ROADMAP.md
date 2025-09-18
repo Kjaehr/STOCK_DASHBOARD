@@ -54,7 +54,7 @@ Tech/UX
 - Keyboard: / fokus i søgning; Enter = åbn Details
 Acceptance criteria
 - [ ] 95%+ CLS‑fri interaktion (ingen layout shift ved load)
-- [ ] Keyboard shortcuts virker og er dokumenteret
+- [x] Keyboard shortcuts virker og er dokumenteret
 - [ ] Ingen layout‑overflow på mobil (<360px) udover kontrolleret hor. scroll i tabel
 
 ### Fase 3 – Ticker Detail (cards + moderne chart)
@@ -160,9 +160,9 @@ Acceptance criteria
 ## Næste sprint (foreslået)
 - Fase 2 (Leaderboard)
   - [x] StatCards: Tickers/Avg Score/Updated (Provider mix pending)
-  - [ ] Chip‑presets + keyboard shortcuts
-  - [ ] Tabel‑polish + tom‑tilstand  •  [x] Skeleton rows (loading)
-  - [ ] URL‑synk for søgning/sort/preset
+  - [ ] Chip‑presets  •  [x] Keyboard shortcuts ('/' focus, Enter opens)
+  - [ ] Tabel‑polish  •  [x] Skeleton rows (loading)  •  [x] Empty state
+  - [x] URL‑synk for søgning/sort/preset
 
 ---
 
