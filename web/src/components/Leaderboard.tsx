@@ -112,6 +112,8 @@ export default function Leaderboard() {
     replaceUrlFromState(p)
   }
 
+  const didInitFromUrlRef = useRef(false)
+
 
   const [newTicker, setNewTicker] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
@@ -140,8 +142,11 @@ export default function Leaderboard() {
     const urlS = (params.get('s') as any) || 'score'
     const urlD = (params.get('d') as any) || 'desc'
     if (urlQ !== null && urlQ !== q) setQ(urlQ)
-    // Only update preset if the URL explicitly carries it; avoid defaulting to 'NONE' which can clobber local state
-    if (urlP !== null && urlP !== preset) setPreset(urlP)
+    // Initialize preset from URL only once to avoid bouncing back to 'All'
+    if (!didInitFromUrlRef.current) {
+      if (urlP !== null && urlP !== preset) setPreset(urlP)
+      didInitFromUrlRef.current = true
+    }
     if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
     if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
   }, [sp])
