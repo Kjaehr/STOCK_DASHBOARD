@@ -60,6 +60,9 @@ _ensure_ascii_ca_bundle()
 USE_POLYGON = os.getenv("USE_POLYGON", "").strip() == "1"
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") or ""
 
+# Simple in-process cache to avoid repeated calls for same symbol/duration (e.g., SPY for RS)
+_POLY_CACHE: dict[tuple[str, int], Any] = {}
+
 # Respect 5 calls/min (12s) on free tier
 _POLY_LAST_CALL = 0.0
 
@@ -86,6 +89,11 @@ def _poly_us_symbol(symbol: str) -> bool:
 def _poly_fetch_hist_df(symbol: str, days: int = 730):
     if not (USE_POLYGON and POLYGON_API_KEY and _poly_us_symbol(symbol)):
         return None
+    # Cache key per symbol/days to avoid repeated calls (e.g., SPY for RS on every ticker)
+    key = (symbol.upper().strip(), int(days))
+    cached = _POLY_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         from datetime import date, timedelta
         import urllib.request, urllib.parse, json as _json
@@ -110,6 +118,7 @@ def _poly_fetch_hist_df(symbol: str, days: int = 730):
         low = [float(r.get("l")) for r in rows]
         vol = [float(r.get("v")) for r in rows]
         df = _pd.DataFrame({"Close": close, "High": high, "Low": low, "Volume": vol}, index=_pd.to_datetime(ts))
+        _POLY_CACHE[key] = df
         return df
     except Exception as e:
         # Fallback handled by caller
