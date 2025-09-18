@@ -9,12 +9,16 @@ const distDir = process.env.NEXT_DIST_DIR || path.join(os.tmpdir(), 'stock_dashb
 // Explicit workspace root to silence Next.js warning about multiple lockfiles
 const root = path.resolve(__dirname, '..')
 
+// Allow CI (GitHub Pages) to request a static export build
+const isExport = process.env.NEXT_OUTPUT_EXPORT === '1'
+
 const nextConfig: NextConfig = {
-  // Server runtime on Vercel (no static export) to enable API routes/middleware
+  // Server runtime on Vercel by default; CI can flip to static export
   basePath: base || undefined,
   assetPrefix: base || undefined,
   distDir,
   outputFileTracingRoot: root,
+  ...(isExport ? { output: 'export' } : {}),
 }
 
 export default nextConfig

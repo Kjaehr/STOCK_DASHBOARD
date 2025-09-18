@@ -9,8 +9,8 @@
     "postbuild": "node -e \"require('fs').cpSync('../data','public/data',{recursive:true})\"",
     "start": "next start",
     "lint": "next lint",
-    "export": "next build && next export && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\"",
-    "export:local": "next build && next export && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
+    "export": "next build && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\"",
+    "export:local": "next build && node -e \"require('fs').cpSync('../data','out/data',{recursive:true})\""
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.2.6",

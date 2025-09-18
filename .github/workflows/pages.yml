@@ -40,6 +40,7 @@ jobs:
           NEXT_PUBLIC_BASE_PATH: /STOCK_DASHBOARD
           NEXT_PUBLIC_DATA_BASE: https://vbvungcbndwaamphiqmc.supabase.co/storage/v1/object/public/stockdash
           NEXT_DIST_DIR: .next
+          NEXT_OUTPUT_EXPORT: '1'
       - name: Verify export produced index.html
         run: |
           ls -la
