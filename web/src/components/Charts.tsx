@@ -18,8 +18,8 @@ const baseOptions: any = {
       labels: {
         filter: (legendItem: any, chart: any) => {
           const ds = chart?.data?.datasets?.[legendItem.datasetIndex] as any
-          // Hide zone overlays from legend to reduce clutter
-          return !(ds && ds.isZoneOverlay === true)
+          // Hide overlay-only datasets (zones, stops, targets) from legend to reduce clutter
+          return !(ds && (ds.isOverlay === true || ds.isZoneOverlay === true))
         },
       },
     },
@@ -58,8 +58,8 @@ const baseOptions: any = {
   spanGaps: true,
 }
 
-export function PriceChart({ labels, close, sma50, sma200, zones }: { labels: string[]; close: (number|null)[]; sma50: (number|null)[]; sma200: (number|null)[]; zones?: BuyZone[] }) {
-  const zoneDatasets: any[] = []
+export function PriceChart({ labels, close, sma50, sma200, zones, exits }: { labels: string[]; close: (number|null)[]; sma50: (number|null)[]; sma200: (number|null)[]; zones?: BuyZone[]; exits?: { stop_suggest?: number | null; targets?: number[] } }) {
+  const overlay: any[] = []
   if (zones && zones.length && labels.length) {
     zones.forEach((z) => {
       if (typeof z.price_low !== 'number' || typeof z.price_high !== 'number') return
@@ -70,7 +70,7 @@ export function PriceChart({ labels, close, sma50, sma200, zones }: { labels: st
       const border = z.type === 'breakout_retest' ? 'rgba(217, 119, 6, 0.6)' : 'rgba(56, 161, 105, 0.6)'
       const label = z.type === 'sma_pullback' ? `Buy zone (${z.ma ?? 'SMA'})` : (z.type === 'breakout_retest' ? 'Buy zone (Retest)' : 'Buy zone')
       // Upper edge
-      zoneDatasets.push({
+      overlay.push({
         label,
         data: base,
         borderColor: border,
@@ -81,13 +81,14 @@ export function PriceChart({ labels, close, sma50, sma200, zones }: { labels: st
         pointRadius: 0,
         order: 0,
         isZoneOverlay: true,
+        isOverlay: true,
         role: 'high',
         zoneLow: lo,
         zoneHigh: hi,
         zoneLabel: label,
       })
       // Lower edge (invisible; acts as fill target)
-      zoneDatasets.push({
+      overlay.push({
         label: label + ' (low)',
         data: low,
         borderColor: border,
@@ -98,6 +99,7 @@ export function PriceChart({ labels, close, sma50, sma200, zones }: { labels: st
         pointRadius: 0,
         order: 0,
         isZoneOverlay: true,
+        isOverlay: true,
         role: 'low',
         zoneLow: lo,
         zoneHigh: hi,
@@ -105,10 +107,26 @@ export function PriceChart({ labels, close, sma50, sma200, zones }: { labels: st
       })
     })
   }
+  // Exit overlays: stop (red) and targets (purple dashed)
+  if (labels.length && exits) {
+    const stop = exits.stop_suggest
+    if (typeof stop === 'number' && Number.isFinite(stop)) {
+      overlay.push({
+        label: 'Stop', data: new Array(labels.length).fill(stop), borderColor: '#e53e3e', borderWidth: 1.5, pointRadius: 0, tension: 0, order: 10, isOverlay: true,
+      })
+    }
+    const targets = Array.isArray(exits.targets) ? exits.targets : []
+    targets.forEach((t, i) => {
+      if (typeof t !== 'number' || !Number.isFinite(t)) return
+      overlay.push({
+        label: `Target ${i+1}`, data: new Array(labels.length).fill(t), borderColor: '#6b46c1', borderDash: [6,4], borderWidth: 1.3, pointRadius: 0, tension: 0, order: 10, isOverlay: true,
+      })
+    })
+  }
   const data = {
     labels,
     datasets: [
-      ...zoneDatasets,
+      ...overlay,
       { label: 'Close', data: close, borderColor: '#2b6cb0', tension: 0.2 },
       { label: 'SMA50', data: sma50, borderColor: '#38a169', tension: 0.2 },
       { label: 'SMA200', data: sma200, borderColor: '#dd6b20', tension: 0.2 },

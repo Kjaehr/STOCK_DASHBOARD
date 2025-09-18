@@ -183,6 +183,17 @@ jobs:
           git commit -m "auto: refresh data $(date -u +%FT%TZ)" || echo "No changes"
           git push
 
+
+Note (optional, Polygon.io EOD data):
+- Add repository secret POLYGON_API_KEY in GitHub → Settings → Secrets and variables → Actions.
+- To enable Polygon in the nightly build, set env in the workflow job:
+
+  env:
+    USE_POLYGON: "1"
+    POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
+If USE_POLYGON is not set or the key is missing, the pipeline falls back to yfinance automatically.
+
 5) Minimal file tree
 stock-dashboard/
 ├─ data/                      # AUTO-GENERATED (committed by Action)
@@ -528,3 +539,9 @@ Output/JSON (eksempel):
 ```
 
 Noter (gratis/fri-tier): Vi forbliver inden for yfinance + RSS. Hvor data mangler, bruger vi konservative defaults og tydelige flags. Ingen tredjeparts betalte APIs.
+
+
+
+
+python scripts/fetch_compute.py — to build data artifacts
+python scripts/fetch_compute.py --backtest — to run the new mini-backtest

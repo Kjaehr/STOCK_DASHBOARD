@@ -405,7 +405,7 @@ export default function TickerClient({ id }: { id: string }) {
           )}
           {labels.length ? (
             <div style={{height:160, marginTop:8}}>{/* Price chart */}
-              <PriceChart labels={labels} close={priceClose} sma50={priceSMA50} sma200={priceSMA200} zones={(data as any)?.buy_zones} />
+              <PriceChart labels={labels} close={priceClose} sma50={priceSMA50} sma200={priceSMA200} zones={(data as any)?.buy_zones} exits={(data as any)?.exit_levels} />
             </div>
           ) : null}
         </div>
@@ -434,6 +434,14 @@ export default function TickerClient({ id }: { id: string }) {
             ))}
             {(!(((data as any)?.buy_zones as any[]) || []).length) ? <small style={{color:'#666'}}>Ingen købszoner endnu</small> : null}
           </div>
+          {/* Position health chips */}
+          <div style={{display:'flex', gap:8, flexWrap:'wrap', marginTop:6}}>
+            <span style={chip} title="Entry readiness (0-100)">Entry: {((data as any)?.position_health?.entry_readiness ?? '--')}</span>
+            <span style={chip} title="Exit risk (0-100)">Exit risk: {((data as any)?.position_health?.exit_risk ?? '--')}</span>
+            <span style={chip} title="Distance from price to suggested stop">Dist→Stop: {(((data as any)?.position_health?.dist_to_stop_pct) == null ? '--' : `${(data as any).position_health.dist_to_stop_pct}%`)}</span>
+            <span style={chip} title="Distance from price to first target">Dist→T1: {(((data as any)?.position_health?.dist_to_t1_pct) == null ? '--' : `${(data as any).position_health.dist_to_t1_pct}%`)}</span>
+          </div>
+
         </div>
 
         <div style={card}>

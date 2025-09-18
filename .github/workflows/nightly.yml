@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # allow committing /data
+    env:
+      USE_POLYGON: "1"
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

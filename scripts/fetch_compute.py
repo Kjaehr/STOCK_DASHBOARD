@@ -20,7 +20,10 @@ from pathlib import Path
 from datetime import datetime, timezone
 import time
 import math
-import certifi
+try:
+    import certifi as _certifi
+except Exception:
+    _certifi = None
 from typing import Any, Callable, Optional, TypeVar, Tuple
 
 # Ensure TLS CA bundle for curl_cffi/requests on Windows/OneDrive paths
@@ -29,7 +32,9 @@ from typing import Any, Callable, Optional, TypeVar, Tuple
 import os as _os_for_ca
 def _ensure_ascii_ca_bundle() -> None:
     try:
-        _src = certifi.where()
+        if _certifi is None:
+            return
+        _src = _certifi.where()
         _ca_path = _src
         if _os_for_ca.name == 'nt':
             _target_dir = r"C:\Users\Public\stockdash-cert"
@@ -42,7 +47,6 @@ def _ensure_ascii_ca_bundle() -> None:
             except Exception:
                 _ca_path = _src
         # Set env for requests, curl_cffi, and OpenSSL consumers within this process
-
         _os_for_ca.environ["SSL_CERT_FILE"] = _ca_path
         _os_for_ca.environ["CURL_CA_BUNDLE"] = _ca_path
         _os_for_ca.environ["REQUESTS_CA_BUNDLE"] = _ca_path
@@ -51,6 +55,66 @@ def _ensure_ascii_ca_bundle() -> None:
         pass
 
 _ensure_ascii_ca_bundle()
+
+# --- Optional Polygon.io integration (free-tier EOD) ---
+USE_POLYGON = os.getenv("USE_POLYGON", "").strip() == "1"
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") or ""
+
+# Respect 5 calls/min (12s) on free tier
+_POLY_LAST_CALL = 0.0
+
+def _poly_sleep_if_needed():
+    global _POLY_LAST_CALL
+    now = time.time()
+    delta = now - _POLY_LAST_CALL
+    min_gap = 12.2
+    if delta < min_gap:
+        time.sleep(min_gap - delta)
+    _POLY_LAST_CALL = time.time()
+
+_US_EX_SUFFIXES = {".CO",".TO",".L",".DE",".PA",".SW",".HK",".SI",".AX",".NZ",".SA",".MX",".VI",".HE",".ST",".OL",".MI",".BR",".MC",".IS"}
+
+def _poly_us_symbol(symbol: str) -> bool:
+    s = symbol.upper().strip()
+    if not s or any(c.isspace() for c in s):
+        return False
+    # Non-US usually carry country suffix like ".CO"; allow class dots like BRK.B
+    if any(s.endswith(suf) for suf in _US_EX_SUFFIXES):
+        return False
+    return True
+
+def _poly_fetch_hist_df(symbol: str, days: int = 730):
+    if not (USE_POLYGON and POLYGON_API_KEY and _poly_us_symbol(symbol)):
+        return None
+    try:
+        from datetime import date, timedelta
+        import urllib.request, urllib.parse, json as _json
+        end = date.today()
+        start = end - timedelta(days=days)
+        base = f"https://api.polygon.io/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start.isoformat()}/{end.isoformat()}"
+        qs = urllib.parse.urlencode({"adjusted":"true","sort":"asc","limit":50000,"apiKey":POLYGON_API_KEY})
+        url = f"{base}?{qs}"
+        _poly_sleep_if_needed()
+        req = urllib.request.Request(url, headers={"Accept":"application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        if not isinstance(data, dict) or (data.get("resultsCount",0) <= 0):
+            return None
+        rows = data.get("results") or []
+        # Build pandas DataFrame with Yahoo-like columns
+        assert pd is not None
+        import pandas as _pd
+        ts = [datetime.fromtimestamp(int(r.get("t",0))/1000.0).date() for r in rows]
+        close = [float(r.get("c")) for r in rows]
+        high = [float(r.get("h")) for r in rows]
+        low = [float(r.get("l")) for r in rows]
+        vol = [float(r.get("v")) for r in rows]
+        df = _pd.DataFrame({"Close": close, "High": high, "Low": low, "Volume": vol}, index=_pd.to_datetime(ts))
+        return df
+    except Exception as e:
+        # Fallback handled by caller
+        print(f"WARN: polygon fetch failed for {symbol}: {e}")
+        return None
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -176,17 +240,23 @@ def _get_info_safe(ticker: Any) -> dict:
 
 def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     flags: list[str] = []
-    if yf is None:
-        raise RuntimeError("yfinance not installed; run: python -m pip install yfinance pandas feedparser vaderSentiment")
     if pd is None:
         raise RuntimeError("pandas not installed; run: python -m pip install pandas")
-    assert yf is not None
-    assert pd is not None
-    t = yf.Ticker(symbol)
-    try:
-        hist = t.history(period="1y", interval="1d", auto_adjust=False)
-    except Exception as e:
-        raise RuntimeError(f"history failed for {symbol}: {e}")
+    # Try Polygon first if enabled and symbol is US-like
+    hist = None
+    if USE_POLYGON and POLYGON_API_KEY and _poly_us_symbol(symbol):
+        hist = _poly_fetch_hist_df(symbol, days=730)
+        if hist is None:
+            flags.append("poly_fallback")
+    # Fallback to yfinance
+    if hist is None:
+        if yf is None:
+            raise RuntimeError("yfinance not installed; run: python -m pip install yfinance pandas feedparser vaderSentiment")
+        t = yf.Ticker(symbol)
+        try:
+            hist = t.history(period="1y", interval="1d", auto_adjust=False)
+        except Exception as e:
+            raise RuntimeError(f"history failed for {symbol}: {e}")
 
     if hist is None or len(hist) == 0 or "Close" not in hist:
         flags.append("no_price_data")
@@ -288,11 +358,22 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     rs_ratio = None
     rs_rising = False
     try:
-        spy = yf.Ticker("SPY")
-        spy_hist = spy.history(period="1y", interval="1d", auto_adjust=False)
-        if spy_hist is not None and len(spy_hist) and "Close" in spy_hist:
-            spy_close = spy_hist["Close"].astype(float)
+        sc = None
+        # Try Polygon first if enabled
+        try:
+            df_spy = _poly_fetch_hist_df("SPY", days=400)
+        except Exception:
+            df_spy = None
+        if df_spy is not None and "Close" in df_spy:
+            spy_close = df_spy["Close"].astype(float)
             sc = spy_close.reindex(close.index)
+        elif yf is not None:
+            spy = yf.Ticker("SPY")
+            spy_hist = spy.history(period="1y", interval="1d", auto_adjust=False)
+            if spy_hist is not None and len(spy_hist) and "Close" in spy_hist:
+                spy_close = spy_hist["Close"].astype(float)
+                sc = spy_close.reindex(close.index)
+        if sc is not None:
             try:
                 sc = sc.ffill().bfill()
             except Exception:
@@ -935,6 +1016,7 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
 
         flags.extend(fflags)
 
+
     except Exception as e:
 
         flags.append(f"fund_fail:{e.__class__.__name__}")
@@ -999,6 +1081,75 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
             zones.append({"type":"breakout_retest","level":round(float(recent_high),2),"price_low":round(pl,2),"price_high":round(ph,2),"confidence":0.6,"rationale":"Retest of recent resistance"})
     except Exception:
         zones = []
+    # Exit levels and portfolio health (lightweight EOD heuristics)
+    exit_levels: dict | None = None
+    position_health: dict | None = None
+    try:
+        price = tech.get("price")
+        sma50 = tech.get("sma50")
+        sma200 = tech.get("sma200")
+        atr_pct = tech.get("atr_pct")
+        trend = (tech_meta.get("trend") or {}) if isinstance(tech_meta, dict) else {}
+        volc = (tech_meta.get("vol_confirm") or {}) if isinstance(tech_meta, dict) else {}
+        in_zone = False
+        if isinstance(price, (int, float)):
+            for z in zones:
+                try:
+                    if float(z.get("price_low", -1)) <= price <= float(z.get("price_high", -1)):
+                        in_zone = True
+                        break
+                except Exception:
+                    pass
+        atr_abs = (price * (atr_pct / 100.0)) if (isinstance(price,(int,float)) and isinstance(atr_pct,(int,float))) else None
+        # Stop at SMA50 minus 1 ATR; targets at +1.5R and +2.5R from current price
+        stop_suggest = None
+        if atr_abs is not None and isinstance(sma50,(int,float)) and isinstance(price,(int,float)):
+            stop_suggest = max(0.0, min(price, float(sma50) - 1.0 * atr_abs))
+        targets: list[float] = []
+        if atr_abs is not None and isinstance(price,(int,float)):
+            targets = [round(price + 1.5 * atr_abs, 2), round(price + 2.5 * atr_abs, 2)]
+        if stop_suggest is not None or targets:
+            exit_levels = {
+                "stop_suggest": None if stop_suggest is None else round(float(stop_suggest), 2),
+                "targets": targets,
+                "rationale": "Stop≈SMA50−1·ATR; Targets≈+1.5R/+2.5R from last"
+            }
+        # Entry readiness and exit risk scores (0-100)
+        trend_ok = bool(trend.get("close_gt_sma200") and trend.get("sma50_gt_sma200"))
+        vol_ok = bool(volc.get("rising20") and volc.get("price_gt_ma20"))
+        above_sma50 = isinstance(price,(int,float)) and isinstance(sma50,(int,float)) and price >= sma50
+        entry_score = 0
+        entry_score += 30 if trend_ok else 0
+        entry_score += 40 if in_zone else 0
+        entry_score += 15 if vol_ok else 0
+        entry_score += 15 if above_sma50 else 0
+        entry_score = max(0, min(100, entry_score))
+        exit_risk = 0
+        if isinstance(price,(int,float)) and isinstance(sma50,(int,float)) and price < sma50:
+            exit_risk += 50
+        if isinstance(price,(int,float)) and isinstance(sma200,(int,float)) and price < sma200:
+            exit_risk += 80
+        if not vol_ok:
+            exit_risk += 10
+        if in_zone:
+            exit_risk -= 10
+        exit_risk = max(0, min(100, exit_risk))
+        dist_to_stop_pct = None
+        dist_to_t1_pct = None
+        if isinstance(price,(int,float)) and isinstance(stop_suggest,(int,float)) and price > 0:
+            dist_to_stop_pct = (price - float(stop_suggest)) / price * 100.0
+        if isinstance(price,(int,float)) and targets and price > 0:
+            dist_to_t1_pct = (targets[0] - price) / price * 100.0
+        position_health = {
+            "entry_readiness": entry_score,
+            "exit_risk": exit_risk,
+            "in_buy_zone": in_zone,
+            "dist_to_stop_pct": None if dist_to_stop_pct is None else round(dist_to_stop_pct, 2),
+            "dist_to_t1_pct": None if dist_to_t1_pct is None else round(dist_to_t1_pct, 2),
+        }
+    except Exception:
+        pass
+
 
     # Weighted total (configurable via config/weights.json)
     _w = {"fundamentals": 0.40, "technicals": 0.35, "sentiment": 0.25}
@@ -1037,6 +1188,8 @@ def process_ticker(label: str) -> Tuple[dict, list[str]]:
 
         "sentiment": {**sent_meta},
         "buy_zones": zones,
+        "exit_levels": exit_levels,
+        "position_health": position_health,
 
         "price": tech.get("price"),
 
@@ -1068,6 +1221,7 @@ def _sma(arr: list[float], window: int) -> list[float]:
             s -= q.pop(0)
         out.append(s / len(q))
     return out
+
 
 
 def _backtest_buyzones_from_series(series: dict, conf: dict | None = None) -> dict:
