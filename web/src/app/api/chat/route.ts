@@ -118,16 +118,40 @@ export async function POST(req: Request) {
     }
 
     const input = buildInput(lang, prompt, summaries)
-    const primary = (env('HF_MODEL_ID_PRIMARY', false) as string) || (env('HF_MODEL_ID', false) as string) || 'TheFinAI/finma-7b-full'
-    const fallback = (env('HF_MODEL_ID_FALLBACK', false) as string) || 'TheFinAI/finma-7b-nlp'
+
+    const configuredList = ((env('HF_MODEL_LIST', false) as string) || '')
+      .split(',').map(s => s.trim()).filter(Boolean)
+    const primary = (env('HF_MODEL_ID_PRIMARY', false) as string) || (env('HF_MODEL_ID', false) as string)
+    const fallback = (env('HF_MODEL_ID_FALLBACK', false) as string)
+
+    const candidates = Array.from(new Set([
+      ...configuredList,
+      primary,
+      fallback,
+      // Common known variants
+      'TheFinAI/finma-7b-full',
+      'ChanceFocus/finma-7b-full',
+      'TheFinAI/finma-7b-nlp',
+      'ChanceFocus/finma-7b-nlp',
+      'TheFinAI/FinMA-7B-NLP',
+      'ChanceFocus/FinMA-7B-NLP',
+    ].filter(Boolean)))
 
     let answer = ''
-    let usedModel = primary
-    try {
-      answer = await callHF(input, primary)
-    } catch (e) {
-      usedModel = fallback
-      answer = await callHF(input, fallback)
+    let usedModel = ''
+    const errors: string[] = []
+    for (const m of candidates) {
+      try {
+        answer = await callHF(input, m)
+        usedModel = m
+        break
+      } catch (e: any) {
+        errors.push(`${m}: ${e?.message || 'error'}`)
+      }
+    }
+
+    if (!usedModel) {
+      return new Response(JSON.stringify({ error: 'All model candidates failed', candidates, errors }), { status: 502, headers: { 'content-type': 'application/json' } })
     }
 
     // Optional: log to Supabase (if tables exist). Best-effort; ignore failures.
