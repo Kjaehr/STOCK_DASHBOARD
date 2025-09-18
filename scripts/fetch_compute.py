@@ -242,12 +242,16 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     flags: list[str] = []
     if pd is None:
         raise RuntimeError("pandas not installed; run: python -m pip install pandas")
+    # Track which provider we actually used
+    provider = "unknown"
     # Try Polygon first if enabled and symbol is US-like
     hist = None
     if USE_POLYGON and POLYGON_API_KEY and _poly_us_symbol(symbol):
         hist = _poly_fetch_hist_df(symbol, days=730)
         if hist is None:
             flags.append("poly_fallback")
+        else:
+            provider = "polygon"
     # Fallback to yfinance
     if hist is None:
         if yf is None:
@@ -255,12 +259,14 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
         t = yf.Ticker(symbol)
         try:
             hist = t.history(period="1y", interval="1d", auto_adjust=False)
+            provider = "yfinance"
         except Exception as e:
             raise RuntimeError(f"history failed for {symbol}: {e}")
 
     if hist is None or len(hist) == 0 or "Close" not in hist:
         flags.append("no_price_data")
         return {
+            "provider": provider,
             "price": None,
             "sma50": None,
             "sma200": None,
@@ -385,6 +391,7 @@ def compute_indicators(symbol: str) -> Tuple[dict, list[str]]:
     except Exception:
         pass
     return {
+        "provider": provider,
         "price": price,
         "sma50": sma50_last,
         "sma200": sma200_last,
@@ -911,6 +918,8 @@ def score_technicals(t: dict) -> Tuple[int, dict]:
 
 
     details = {
+
+        "provider": t.get("provider"),
 
         "trend": {"close_gt_sma200": bool(price is not None and sma200 is not None and price > sma200),
 

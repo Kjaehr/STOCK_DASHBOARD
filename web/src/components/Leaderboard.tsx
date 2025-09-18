@@ -215,6 +215,7 @@ export default function Leaderboard() {
         <Input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
+        <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
         <Select value={preset} onValueChange={(v)=>setPreset(v as any)}>
           <SelectTrigger className="w-44"><SelectValue placeholder="Presets" /></SelectTrigger>
           <SelectContent>

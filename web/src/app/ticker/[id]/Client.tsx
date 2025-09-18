@@ -364,6 +364,8 @@ export default function TickerClient({ id }: { id: string }) {
           <span style={{padding:'4px 10px', borderRadius:16, background:'#f4f7ff', border:'1px solid #e3e9ff', color:scoreColor(data?.score), fontWeight:600}}>Score: {data?.score ?? '--'}</span>
           <small style={{color:'#666'}}>Updated: {data?.updated_at ?? '--'}{usingCache ? ' (cache)' : ''}</small>
           <small style={{color:'#666'}}>Data refresh: {timeAgo(meta?.generated_at)}{metaCached ? ' (cache)' : ''}</small>
+          <span style={chip} title={`DATA_BASE endpoint`}>Endpoint: {DATA_BASE}</span>
+          <span style={chip} title="Data provider for this ticker">Source: {(((data as any)?.technicals)?.provider) || '--'}</span>
         </div>
         <div style={{display:'flex', gap:8}}>{/* Actions */}
           <a href={`${BASE}/`} style={{textDecoration:'none'}}>&larr; Back</a>
