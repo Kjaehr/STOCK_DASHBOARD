@@ -38,7 +38,7 @@ jobs:
           npm run export
         env:
           NEXT_PUBLIC_BASE_PATH: /STOCK_DASHBOARD
-          NEXT_PUBLIC_DATA_BASE: https://raw.githubusercontent.com/${{ github.repository }}/main/data
+          NEXT_PUBLIC_DATA_BASE: https://vbvungcbndwaamphiqmc.supabase.co/storage/v1/object/public/stockdash
           NEXT_DIST_DIR: .next
       - name: Verify export produced index.html
         run: |
