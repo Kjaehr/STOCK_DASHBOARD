@@ -545,3 +545,63 @@ Noter (gratis/fri-tier): Vi forbliver inden for yfinance + RSS. Hvor data mangle
 
 python scripts/fetch_compute.py — to build data artifacts
 python scripts/fetch_compute.py --backtest — to run the new mini-backtest
+
+
+
+
+
+
+Skal vi stadig bruge GitHub Actions?
+Kort svar: Du behøver ikke bruge Actions til at serve data, men du skal stadig have en “producer”, der genererer/opdaterer JSON’erne hver 15. minut.
+
+Du har i dag en Python‑pipeline (scripts/fetch_compute.py). Der er to veje:
+
+Hurtigste og mindst risikable (anbefalet nu):
+Behold Python som er, men lad GitHub Actions køre hver 15. minut og uploade output til Supabase Storage i stedet for at committe til repoet.
+Frontend læser herefter via vores nye /api/data‑route. Ingen rebuilds.
+Fordele: Ingen omskrivning af Python → mindst arbejde, stabilt, gratis. Ulempen: Actions er stadig “motoren”, men det er backend‑arbejde og ikke en del af frontenden.
+“Ren” serverless backend uden Actions (kræver ekstra arbejde):
+Portér Python‑logikken til TypeScript og kør den i:
+Supabase Edge Function + Supabase Cron (hver 15. min), eller
+Vercel Serverless/Edge Function + Vercel Cron (hver 15. min)
+Funktionen henter data (Yahoo/RSS), beregner indikatorer og skriver JSON til Supabase Storage.
+Fordele: Alt kører “inde i backend”. Ulempe: Omskrivning af hele pipelinen fra Python → TS.
+I praksis starter jeg typisk med første løsning (Actions som data‑producer), så UI og arkitektur er decouplet nu, og vi kan senere portere til Edge Functions hvis ønsket.
+
+15-min opdatering — konkret plan (anbefalet)
+Sæt disse Vercel envs (Project Settings → Environment Variables):
+SUPABASE_URL, SUPABASE_KEY (anon key er ok til public read; service role er kun nødvendig hvis bucketen var privat)
+SUPABASE_BUCKET = stockdash
+NEXT_PUBLIC_DATA_BASE = /api/data
+DATA_TTL_SECONDS = 900
+Opdatér din GitHub Action til at:
+Køre scripts/fetch_compute.py
+Uploade alle data/*.json + data/meta.json til Supabase Storage “stockdash” med REST (curl PUT)
+Efter første upload læser frontenden via /api/data/meta.json osv. — uden rebuild.
+Eksempel på upload‑step (curl) pr. fil:
+
+Vi kan selvfølgelig loope alle filer (inkl. meta.json). Jeg kan tilføje en komplet workflow for dig, når du siger til.
+
+Alternativ: Ægte backend (uden Actions)
+Hvis du vil helt væk fra Actions nu, foreslår jeg Supabase Edge Function + Cron hvert 15. min:
+
+edge function fetcher Yahoo/RSS, beregner SMA/RSI/ATR/score, skriver til Storage
+vores /api/data proxy forbliver uændret
+kræver omskrivning af Python til TypeScript (kan gøres trinvist: start med meta.json + et par tickers)
+Svar på dit spørgsmål
+Ja, “backend” bør stå for dataopdatering — derfor enten:
+Actions som midlertidig “backend‑worker”, der uploader til Storage (nuværende anbefaling), eller
+Edge/Serverless cron‑jobs, når vi har portet Python til TS.
+Frontend kalder kun vores serverless API (/api/data) og er dermed decouplet fra builds.
+[NEXT STEPS]
+Bekræft: Skal vi bruge den hurtige løsning nu (Actions uploader → Storage hver 15 min)?
+Hvis ja:
+Sæt Vercel envs (som ovenfor).
+Giv grønt lys, så tilføjer jeg en GitHub Action workflow, der kører hvert 15. minut og uploader alle JSON‑filer til “stockdash”.
+Hvis du hellere vil have ren serverless backend nu:
+Jeg skitserer en Supabase Edge Function (TypeScript) med cron hvert 15. min og plan for gradvis port af Python.
+[IMPROVEMENTS]
+Per‑fil TTL: kortere TTL for meta.json, længere for historik; kan sættes i route baseret på path.
+Bedre observability: log upload‑resultater i Actions; i API‑routen log status/hit‑miss (uden at eksponere nøgler).
+Fail‑safe: ved upload‑fejl, behold sidste gyldige JSON (vi proxy’er, så UI fejler ikke hårdt).
+Senere: skift til Supabase Edge Function + Cron for en 100% serverless pipeline uden Actions.
