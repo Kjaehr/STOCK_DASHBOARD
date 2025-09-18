@@ -129,13 +129,14 @@ export default function Leaderboard() {
   // Read state from URL on navigation/back/forward
   useEffect(() => {
     const params = new URLSearchParams(sp?.toString() || '')
-    const urlQ = params.get('q') || ''
-    const urlP = (params.get('p') as any) || 'NONE'
+    const urlQ = params.get('q') ?? null
+    const urlP = params.get('p') as any | null
     const urlOP = params.get('op') === '1'
     const urlS = (params.get('s') as any) || 'score'
     const urlD = (params.get('d') as any) || 'desc'
-    if (urlQ !== q) setQ(urlQ)
-    if (urlP !== preset) setPreset(urlP)
+    if (urlQ !== null && urlQ !== q) setQ(urlQ)
+    // Only update preset if the URL explicitly carries it; avoid defaulting to 'NONE' which can clobber local state
+    if (urlP !== null && urlP !== preset) setPreset(urlP)
     if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
     if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
   }, [sp])
@@ -152,7 +153,7 @@ export default function Leaderboard() {
     const next = `${pathname}${params.toString() ? `?${params.toString()}` : ''}`
     const current = `${pathname}${sp && sp.toString() ? `?${sp.toString()}` : ''}`
     if (next !== current) router.replace(next, { scroll: false })
-  }, [q, preset, onlyPriced, sort, pathname, router, sp])
+  }, [q, preset, onlyPriced, sort, pathname, router])
 
 
   useEffect(() => {
