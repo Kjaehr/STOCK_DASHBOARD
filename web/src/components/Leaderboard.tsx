@@ -7,7 +7,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 // UI components (shadcn/ui)
 import { Input } from './ui/input'
 import { Button } from './ui/button'
-import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './ui/select'
+
 import { Switch } from './ui/switch'
 import { Badge } from './ui/badge'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from './ui/table'
@@ -277,15 +277,13 @@ export default function Leaderboard() {
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
         <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
-        <Select value={preset} onValueChange={(v)=>setPreset(v as any)}>
-          <SelectTrigger className="w-44"><SelectValue placeholder="Presets" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="NONE">Presets</SelectItem>
-            <SelectItem value="HIGH_MOM">High momentum</SelectItem>
-            <SelectItem value="UNDERVALUED">Undervalued</SelectItem>
-            <SelectItem value="LOW_ATR">Low ATR%</SelectItem>
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-1">
+          {(['NONE','HIGH_MOM','UNDERVALUED','LOW_ATR'] as const).map(p => (
+            <Button key={p} size="sm" variant={preset===p? 'default':'outline'} aria-pressed={preset===p} onClick={()=>setPreset(p)}>
+              {p==='NONE'?'All':p==='HIGH_MOM'?'High mom':p==='UNDERVALUED'?'Undervalued':'Low ATR%'}
+            </Button>
+          ))}
+        </div>
         <div className="flex items-center gap-2">{/* Only priced */}
           <Switch checked={onlyPriced} onCheckedChange={setOnlyPriced} id="only-priced" />
           <label htmlFor="only-priced" className="text-sm text-muted-foreground">Only with price</label>
@@ -331,7 +329,7 @@ export default function Leaderboard() {
         <Table className="w-full text-sm min-w-[900px]">{/* Table */}
           <TableHeader className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
             <TableRow className="hover:bg-transparent">
-              <TableHead className="whitespace-nowrap sticky left-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+              <TableHead className="whitespace-nowrap sticky left-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-r">
                 <button onClick={()=>toggleSort('ticker')} className="inline-flex items-center gap-1" title="Sort by ticker">Ticker <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="whitespace-nowrap">
@@ -357,7 +355,7 @@ export default function Leaderboard() {
             {loading ? (
               Array.from({ length: 8 }).map((_, i) => (
                 <TableRow key={`sk-${i}`} className="odd:bg-muted/40 animate-pulse">
-                  <TableCell className="font-medium sticky left-0 z-10 bg-background/80"><div className="h-4 w-16 bg-muted rounded" /></TableCell>
+                  <TableCell className="font-medium sticky left-0 z-10 bg-background/80 border-r"><div className="h-4 w-16 bg-muted rounded" /></TableCell>
                   <TableCell><div className="h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-14 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
@@ -370,7 +368,7 @@ export default function Leaderboard() {
             ) : (
               filtered.map(row => (
                 <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
-                  <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{row.ticker}</TableCell>
+                  <TableCell className="font-medium sticky left-0 z-10 bg-background/95 border-r">{row.ticker}</TableCell>
                   <TableCell>
                     <Tooltip.Root>
                       <Tooltip.Trigger asChild>

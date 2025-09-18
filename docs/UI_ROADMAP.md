@@ -160,8 +160,8 @@ Acceptance criteria
 ## Næste sprint (foreslået)
 - Fase 2 (Leaderboard)
   - [x] StatCards: Tickers/Avg Score/Updated (Provider mix pending)
-  - [ ] Chip‑presets  •  [x] Keyboard shortcuts ('/' focus, Enter opens)
-  - [ ] Tabel‑polish  •  [x] Skeleton rows (loading)  •  [x] Empty state
+  - [x] Chip‑presets  •  [x] Keyboard shortcuts ('/' focus, Enter opens)
+  - [x] Tabel‑polish  •  [x] Skeleton rows (loading)  •  [x] Empty state
   - [x] URL‑synk for søgning/sort/preset
 
 ---
