@@ -3,8 +3,8 @@ import os from 'os'
 import path from 'path'
 
 const base = process.env.NEXT_PUBLIC_BASE_PATH || ''
-// Store Next build artifacts (.next) outside OneDrive to avoid Windows/OneDrive readlink issues
-const distDir = process.env.NEXT_DIST_DIR || path.join(os.tmpdir(), 'stock_dashboard_next')
+// Use standard .next on Vercel so the platform can find build artifacts; use temp dir locally to avoid OneDrive quirks on Windows
+const distDir = process.env.VERCEL ? '.next' : (process.env.NEXT_DIST_DIR || path.join(os.tmpdir(), 'stock_dashboard_next'))
 
 // Explicit workspace root to silence Next.js warning about multiple lockfiles
 const root = path.resolve(__dirname, '..')
