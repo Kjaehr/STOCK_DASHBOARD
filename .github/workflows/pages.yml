@@ -39,6 +39,9 @@ jobs:
       - name: Build data artifacts
         run: |
           python scripts/fetch_compute.py
+        env:
+          USE_POLYGON: "1"
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         working-directory: .
       - name: Install Node dependencies
         run: npm ci
@@ -47,6 +50,7 @@ jobs:
           npm run export
         env:
           NEXT_PUBLIC_BASE_PATH: /STOCK_DASHBOARD
+          NEXT_PUBLIC_DATA_BASE: https://raw.githubusercontent.com/${{ github.repository }}/main/data
           NEXT_DIST_DIR: .next
       - name: Verify export produced index.html
         run: |
