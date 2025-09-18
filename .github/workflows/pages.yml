@@ -27,22 +27,10 @@ jobs:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install Python deps for data build
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance pandas feedparser vaderSentiment
-        working-directory: .
-      - name: Build data artifacts
-        run: |
-          python scripts/fetch_compute.py
-        env:
-          USE_POLYGON: "1"
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        working-directory: .
+      # Data build is handled by Nightly workflow. Pages build should not run the
+      # long-running data fetch to avoid timeouts and rate-limit stalls.
+      # If you ever need to rebuild data here, trigger Nightly instead.
+
       - name: Install Node dependencies
         run: npm ci
       - name: Build static site (Next.js export)
