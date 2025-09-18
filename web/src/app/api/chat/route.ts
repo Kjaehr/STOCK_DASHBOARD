@@ -133,20 +133,44 @@ function parseRssItems(xml: string): { title: string, link?: string }[] {
   return items
 }
 
+const NAME_MAP: Record<string,string> = {
+  AAPL: 'Apple', MSFT: 'Microsoft', TSLA: 'Tesla', SPY: 'SPDR S&P 500',
+  NVO: 'Novo Nordisk', 'NOVO-B.CO': 'Novo Nordisk',
+}
+
 async function fetchNewsHeadlines(tickers: string[], lang: 'da'|'en', perTicker = 8) {
   const headlines: string[] = []
   for (const t of tickers) {
-    const query = lang === 'da' ? `${t} aktie` : `${t} stock`
-    const url = googleNewsUrl(query, lang)
-    try {
-      const r = await fetch(url)
-      const xml = await r.text()
-      const items = parseRssItems(xml).slice(0, perTicker)
-      for (const it of items) { if (it.title) headlines.push(it.title) }
-    } catch {}
+    const name = NAME_MAP[t]
+    const baseTerms = lang === 'da' ? ['aktie'] : ['stock']
+    const terms = Array.from(new Set([
+      t,
+      ...(name ? [name] : []),
+      ...baseTerms.map(w => `${t} ${w}`),
+      ...(name ? baseTerms.map(w => `${name} ${w}`) : []),
+    ]))
+
+    let collected = 0
+    for (const q of terms) {
+      if (collected >= perTicker) break
+      const url = googleNewsUrl(q, lang)
+      try {
+        const r = await fetch(url)
+        const xml = await r.text()
+        const items = parseRssItems(xml)
+        for (const it of items) {
+          if (it.title && headlines.length < 100) {
+            const before = headlines.length
+            headlines.push(it.title)
+            if (headlines.length > before) collected++
+            if (collected >= perTicker) break
+          }
+        }
+      } catch {}
+    }
   }
-  // de-dup
-  return Array.from(new Set(headlines)).slice(0, 20)
+  // de-dup across all
+  return Array.from(new Set(headlines)).slice(0, 40)
 }
 
 async function classifyWithFinBert(texts: string[]) {
@@ -185,7 +209,7 @@ async function callOpenAI(messages: any[]) {
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-5-mini', messages, temperature: 0.3, max_tokens: 800 })
+    body: JSON.stringify({ model: 'gpt-5-mini', messages, temperature: 0.3, max_completion_tokens: 800 })
   })
   const j = await r.json()
   if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
