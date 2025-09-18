@@ -326,8 +326,11 @@ export default function TickerClient({ id }: { id: string }) {
     return vals.length ? vals[vals.length - 1] : null
   }, [rsSeriesPct])
 
-  const rsAccent = rsNow == null ? '#222' : rsNow >= 0 ? '#216e39' : '#a94442'
-  const rsSummary = rsNow == null ? '--' : `${rsNow >= 0 ? '+' : ''}${rsNow.toFixed(1)}% vs SPY`
+  const rsFallbackRising = (data as any)?.technicals?.rs_rising === true
+  const rsPositive = rsNow != null ? (rsNow >= 0) : (rsFallbackRising ? true : null)
+  const rsSummary = rsNow != null
+    ? `${rsNow >= 0 ? '+' : ''}${rsNow.toFixed(1)}% vs SPY`
+    : (rsPositive == null ? '--' : (rsPositive ? 'Rising vs SPY' : 'Weak vs SPY'))
 
   const fundamentalRows = useMemo(() => ([
     { label: 'FCF Yield', value: fmtPercent(F?.fcf_yield), ...evalFcfYield(F?.fcf_yield) },
@@ -424,7 +427,7 @@ export default function TickerClient({ id }: { id: string }) {
             {(((data as any)?.buy_zones as any[]) || []).map((z: any, i: number) => (
               <span
                 key={i}
-                style={{...chip, ...(rsNow == null ? {} : rsNow >= 0 ? { background:'#eef9f0', borderColor:'#c8efd2', color:'#216e39' } : { background:'#fff5f5', borderColor:'#ffd6d6', color:'#a94442' })}}
+                style={{...chip, ...(rsPositive == null ? {} : rsPositive ? { background:'#eef9f0', borderColor:'#c8efd2', color:'#216e39' } : { background:'#fff5f5', borderColor:'#ffd6d6', color:'#a94442' })}}
                 title={z?.rationale || ''}
               >
                 {z?.type === 'sma_pullback' ? `${z?.ma ?? 'SMA'}: ${fmt(z?.price_low)}–${fmt(z?.price_high)}` :
@@ -456,7 +459,7 @@ export default function TickerClient({ id }: { id: string }) {
             <Metric label="RSI(14)" value={fmt(T?.rsi)} accent={rsiColor(T?.rsi)} points={rsiEval.points} max={rsiEval.max} hint={rsiEval.hint} />
             <Metric label="ATR%" value={fmtPercentDirect(T?.atr_pct)} points={atrEval.points} max={atrEval.max} hint={atrEval.hint} />
             <Metric label="Volume confirm" value={volumeEval.value} points={volumeEval.points} max={volumeEval.max} hint={volumeEval.hint} />
-            <Metric label="RS vs SPY" value={rsSummary} accent={rsNow == null ? undefined : (rsNow >= 0 ? '#216e39' : '#a94442')} hint="Outperformance relative to SPY over selected range" />
+            <Metric label="RS vs SPY" value={rsSummary} accent={rsPositive == null ? undefined : (rsPositive ? '#216e39' : '#a94442')} hint="Outperformance (or rising RS) relative to SPY" />
           </div>
           {rsiArr.length ? (
             <div style={{height:120, marginTop:8}}>{/* RSI chart */}
