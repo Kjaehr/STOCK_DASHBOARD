@@ -135,14 +135,17 @@ export default function Leaderboard() {
   useEffect(() => {
     const params = new URLSearchParams(sp?.toString() || '')
     const urlQ = params.get('q') ?? null
-    const urlP = (params.get('p') as 'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null) ?? null
+    const urlP = params.get('p') as 'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null
+    const hasP = params.has('p')
     const urlOP = params.get('op') === '1'
     const urlS = (params.get('s') as any) || 'score'
     const urlD = (params.get('d') as any) || 'desc'
     if (urlQ !== null && urlQ !== q) setQ(urlQ)
-    // Sync preset from URL every time (URL -> state). Default to 'NONE' when absent.
-    const nextPreset = (urlP ?? 'NONE') as 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'
-    if (nextPreset !== preset) setPreset(nextPreset)
+    // Only update preset from URL if the 'p' param is explicitly present
+    if (hasP) {
+      const nextPreset = (urlP ?? 'NONE') as 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'
+      if (nextPreset !== preset) setPreset(nextPreset)
+    }
     if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
     if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
   }, [sp])
