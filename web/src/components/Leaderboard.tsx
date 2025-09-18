@@ -1,5 +1,5 @@
 "use client"
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import type { StockMeta, StockData } from '../types'
 import { BASE, DATA_BASE } from '../base'
 
@@ -82,6 +82,23 @@ export default function Leaderboard() {
   }
 
   const [newTicker, setNewTicker] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  // Keyboard shortcut: "/" focuses search input
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === '/' && !e.metaKey && !e.altKey) {
+        const target = e.target as HTMLElement | null
+        const tag = target?.tagName?.toLowerCase()
+        if (tag !== 'input' && tag !== 'textarea' && !(target as any)?.isContentEditable) {
+          e.preventDefault()
+          searchRef.current?.focus()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -212,7 +229,7 @@ export default function Leaderboard() {
       <Tooltip.Provider delayDuration={0}>
       <h1 className="text-xl font-semibold">Leaderboard</h1>
       <div className="flex flex-wrap items-center gap-3">{/* Controls */}
-        <Input placeholder="Search ticker" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
+        <Input ref={searchRef} placeholder="Search ticker (/)" value={q} onChange={e=>setQ(e.target.value)} className="w-48" />
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
         <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
@@ -236,6 +253,26 @@ export default function Leaderboard() {
       </div>
 
       {error ? <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">{error}</div> : null}
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="rounded-md border bg-card/60 backdrop-blur p-3">
+          <div className="text-xs text-muted-foreground">Tickers</div>
+          <div className="text-lg font-semibold">{items.length}</div>
+        </div>
+        <div className="rounded-md border bg-card/60 backdrop-blur p-3">
+          <div className="text-xs text-muted-foreground">Avg score</div>
+          <div className="text-lg font-semibold">{filtered.length ? (filtered.reduce((a,r)=>a + (r.score ?? 0), 0) / filtered.length).toFixed(1) : '--'}</div>
+        </div>
+        <div className="rounded-md border bg-card/60 backdrop-blur p-3">
+          <div className="text-xs text-muted-foreground">Updated</div>
+          <div className="text-lg font-semibold">{meta?.generated_at ?? '--'}</div>
+        </div>
+        <div className="rounded-md border bg-card/60 backdrop-blur p-3">
+          <div className="text-xs text-muted-foreground">Cache</div>
+          <div className="text-lg font-semibold">{usingCache ? 'Cache' : 'Live'}</div>
+        </div>
+      </div>
 
       <div className="rounded-md border bg-card shadow-sm overflow-auto max-h-[70vh]">
         <Table className="w-full text-sm min-w-[900px]">{/* Table */}
@@ -264,61 +301,76 @@ export default function Leaderboard() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map(row => (
-              <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
-                <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{row.ticker}</TableCell>
-                <TableCell>
-                  <Tooltip.Root>
-                    <Tooltip.Trigger asChild>
-                      <Badge className={scoreBadgeClass(row.score)} title={`Fund ${row.fund_points ?? '--'} / Tech ${row.tech_points ?? '--'} / Sent ${row.sent_points ?? '--'}`}>{row.score ?? 0}</Badge>
-                    </Tooltip.Trigger>
-                    <Tooltip.Portal>
-                      <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
-                        Fund {row.fund_points ?? '--'} / Tech {row.tech_points ?? '--'} / Sent {row.sent_points ?? '--'}
-                        <Tooltip.Arrow className="fill-border" />
-                      </Tooltip.Content>
-                    </Tooltip.Portal>
-                  </Tooltip.Root>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {fmt(row.price)}{' '}
-                  {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
-                    <Badge variant="outline" className="ml-2 border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
-                  ) : null}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{row.fund_points ?? 0}</TableCell>
-                <TableCell className="text-right tabular-nums">{row.tech_points ?? 0}</TableCell>
-                <TableCell className="text-right tabular-nums">{row.sent_points ?? 0}</TableCell>
-                <TableCell className="max-w-[220px] truncate">
-                  {(() => {
-                    const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail'))
-                    if (!shown.length) return '—'
-                    return (
-                      <Tooltip.Root>
-                        <Tooltip.Trigger asChild>
-                          <span className="flex flex-wrap gap-1">
-                            {shown.slice(0,4).map(f => (
-                              <Badge key={String(f)} variant="outline" className="font-normal">{String(f)}</Badge>
-                            ))}
-                            {shown.length > 4 ? <span className="text-xs text-muted-foreground">+{shown.length-4} more</span> : null}
-                          </span>
-                        </Tooltip.Trigger>
-                        <Tooltip.Portal>
-                          <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md max-w-[280px]">
-                            {shown.join(', ')}
-                            <Tooltip.Arrow className="fill-border" />
-                          </Tooltip.Content>
-                        </Tooltip.Portal>
-                      </Tooltip.Root>
-                    )
-                  })()}
-                </TableCell>
-                <TableCell className="text-right space-x-2 whitespace-nowrap">
-                  <a className="underline underline-offset-2" href={`${BASE}/ticker?id=${encodeURIComponent(row.ticker)}`}>Details</a>
-                  <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
-                </TableCell>
-              </TableRow>
-            ))}
+            {loading ? (
+              Array.from({ length: 8 }).map((_, i) => (
+                <TableRow key={`sk-${i}`} className="odd:bg-muted/40 animate-pulse">
+                  <TableCell className="font-medium sticky left-0 z-10 bg-background/80"><div className="h-4 w-16 bg-muted rounded" /></TableCell>
+                  <TableCell><div className="h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-14 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell><div className="h-4 w-40 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-7 w-24 bg-muted rounded" /></TableCell>
+                </TableRow>
+              ))
+            ) : (
+              filtered.map(row => (
+                <TableRow key={row.ticker} className="odd:bg-muted/40 hover:bg-muted/50">
+                  <TableCell className="font-medium sticky left-0 z-10 bg-background/95">{row.ticker}</TableCell>
+                  <TableCell>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger asChild>
+                        <Badge className={scoreBadgeClass(row.score)} title={`Fund ${row.fund_points ?? '--'} / Tech ${row.tech_points ?? '--'} / Sent ${row.sent_points ?? '--'}`}>{row.score ?? 0}</Badge>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+                          Fund {row.fund_points ?? '--'} / Tech {row.tech_points ?? '--'} / Sent {row.sent_points ?? '--'}
+                          <Tooltip.Arrow className="fill-border" />
+                        </Tooltip.Content>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt(row.price)}{' '}
+                    {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
+                      <Badge variant="outline" className="ml-2 border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">{row.fund_points ?? 0}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.tech_points ?? 0}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.sent_points ?? 0}</TableCell>
+                  <TableCell className="max-w-[220px] truncate">
+                    {(() => {
+                      const shown=(row.flags||[]).filter(f=>!String(f).includes('_fail'))
+                      if (!shown.length) return '—'
+                      return (
+                        <Tooltip.Root>
+                          <Tooltip.Trigger asChild>
+                            <span className="flex flex-wrap gap-1">
+                              {shown.slice(0,4).map(f => (
+                                <Badge key={String(f)} variant="outline" className="font-normal">{String(f)}</Badge>
+                              ))}
+                              {shown.length > 4 ? <span className="text-xs text-muted-foreground">+{shown.length-4} more</span> : null}
+                            </span>
+                          </Tooltip.Trigger>
+                          <Tooltip.Portal>
+                            <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md max-w-[280px]">
+                              {shown.join(', ')}
+                              <Tooltip.Arrow className="fill-border" />
+                            </Tooltip.Content>
+                          </Tooltip.Portal>
+                        </Tooltip.Root>
+                      )
+                    })()}
+                  </TableCell>
+                  <TableCell className="text-right space-x-2 whitespace-nowrap">
+                    <a className="underline underline-offset-2" href={`${BASE}/ticker?id=${encodeURIComponent(row.ticker)}`}>Details</a>
+                    <Button size="sm" onClick={()=>addToPortfolio(row.ticker, row.price)}>Add</Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
           </TableBody>
         </Table>
       </div>

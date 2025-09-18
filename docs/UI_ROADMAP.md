@@ -1,8 +1,8 @@
 # UI Roadmap – Stock Dashboard (Dark + Modern Admin Kit)
 
-Status: v1 (foundation started)
+Status: v1 (Foundation DONE; Phase 2 in progress)
 Owner: UI/Frontend
-Last updated: {{YYYY-MM-DD}}
+Last updated: 2025-09-18
 
 ## Vision
 Skabe et moderne, lækkert dashboard i dark mode med "glass"-look, komfort spacing og en stram, konsistent component‑stil. UI’et skal føles hurtigt, roligt og professionelt – og være let at vedligeholde.
@@ -31,7 +31,7 @@ Skabe et moderne, lækkert dashboard i dark mode med "glass"-look, komfort spaci
 
 Hver fase afsluttes med acceptance criteria, visuel QA og small e2e smoke.
 
-### Fase 1 – Foundation & Shell (DONE/IN PROGRESS)
+### Fase 1 – Foundation & Shell (DONE)
 - DashboardShell: sidebar + glass topbar + content container (max-w-7xl)
 - Logo/ikon i venstre hjørne (violet→turkis gradient)
 - Dark som default
@@ -159,9 +159,9 @@ Acceptance criteria
 
 ## Næste sprint (foreslået)
 - Fase 2 (Leaderboard)
-  - [ ] StatCards: Tickers/Avg Score/Updated/Provider mix
+  - [x] StatCards: Tickers/Avg Score/Updated (Provider mix pending)
   - [ ] Chip‑presets + keyboard shortcuts
-  - [ ] Tabel‑polish + skeletons + tom‑tilstand
+  - [ ] Tabel‑polish + tom‑tilstand  •  [x] Skeleton rows (loading)
   - [ ] URL‑synk for søgning/sort/preset
 
 ---
