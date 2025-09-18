@@ -81,6 +81,11 @@ export default function Leaderboard() {
   const pathname = usePathname()
   const sp = useSearchParams()
 
+
+  // Derive active preset from URL when available to avoid remount/reset issues
+  const presetFromUrl = (sp?.get('p') as 'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null) ?? null
+  const activePreset: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR' = presetFromUrl ?? preset
+
   type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'score', dir: 'desc' })
   function toggleSort(key: SortKey) {
@@ -212,17 +217,17 @@ export default function Leaderboard() {
     let arr = items
     if (s) arr = arr.filter(x => x.ticker?.toLowerCase().includes(s))
     if (onlyPriced) arr = arr.filter(x => x.price != null && !(x.flags||[]).some(f => String(f).includes('no_price_data')))
-    if (preset === 'HIGH_MOM') {
+    if (activePreset === 'HIGH_MOM') {
       arr = arr.filter(x => {
         const rsi = (x as any)?.technicals?.rsi
         return typeof rsi === 'number' && rsi > 60
       })
-    } else if (preset === 'UNDERVALUED') {
+    } else if (activePreset === 'UNDERVALUED') {
       arr = arr.filter(x => {
         const fy = (x as any)?.fundamentals?.fcf_yield
         return typeof fy === 'number' && fy >= 0.08
       })
-    } else if (preset === 'LOW_ATR') {
+    } else if (activePreset === 'LOW_ATR') {
       arr = arr.filter(x => {
         const atr = (x as any)?.technicals?.atr_pct
         return typeof atr === 'number' && atr > 0 && atr < 8
@@ -247,7 +252,7 @@ export default function Leaderboard() {
       if (na === nb) return 0
       return na > nb ? 1*dir : -1*dir
     })
-  }, [items, q, preset, onlyPriced, sort])
+  }, [items, q, preset, sp, onlyPriced, sort])
 
   function addToPortfolio(t: string, price?: number | null) {
     try {
@@ -303,7 +308,7 @@ export default function Leaderboard() {
         <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
         <div className="flex items-center gap-1">
           {(['NONE','HIGH_MOM','UNDERVALUED','LOW_ATR'] as const).map(p => (
-            <Button key={p} size="sm" variant={preset===p? 'default':'outline'} aria-pressed={preset===p} onClick={()=>handlePreset(p)}>
+            <Button key={p} size="sm" variant={activePreset===p? 'default':'outline'} aria-pressed={activePreset===p} onClick={()=>handlePreset(p)}>
               {p==='NONE'?'All':p==='HIGH_MOM'?'High mom':p==='UNDERVALUED'?'Undervalued':'Low ATR%'}
             </Button>
           ))}
