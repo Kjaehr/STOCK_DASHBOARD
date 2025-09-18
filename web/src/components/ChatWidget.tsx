@@ -5,6 +5,7 @@ import React from 'react'
 type Meta = { tickers?: string[] }
 
 type Lang = 'da' | 'en'
+type ModelChoice = 'finbert' | 'gpt5'
 
 export default function ChatWidget() {
   const [open, setOpen] = React.useState(false)
@@ -13,6 +14,7 @@ export default function ChatWidget() {
   const [selected, setSelected] = React.useState<string[]>([])
   const [prompt, setPrompt] = React.useState('')
   const [lang, setLang] = React.useState<Lang>('da')
+  const [model, setModel] = React.useState<ModelChoice>('gpt5')
   const [answer, setAnswer] = React.useState<string>('')
   const [sending, setSending] = React.useState(false)
 
@@ -53,7 +55,7 @@ export default function ChatWidget() {
     setSending(true)
     setAnswer('')
     try {
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, tickers: selected, lang }) })
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, tickers: selected, lang, model }) })
       const j = await res.json()
       if (!res.ok) throw new Error(j?.error || 'Server error')
       setAnswer(j.text || '')
@@ -79,11 +81,18 @@ export default function ChatWidget() {
           <div className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
           <div className="relative w-full sm:max-w-xl bg-background text-foreground rounded-md shadow-xl border p-3 sm:p-4 max-h-[90vh] overflow-auto">
             <div className="flex items-center justify-between gap-2">
-              <h2 className="text-lg font-semibold">FinMA Chat</h2>
-              <select value={lang} onChange={e => setLang(e.target.value as Lang)} className="border rounded px-2 py-1 bg-background">
-                <option value="da">Dansk</option>
-                <option value="en">English</option>
-              </select>
+              <h2 className="text-lg font-semibold">AI Chat</h2>
+              <div className="flex items-center gap-2">
+                <label className="text-sm opacity-80">Model</label>
+                <select value={model} onChange={e => setModel(e.target.value as ModelChoice)} className="border rounded px-2 py-1 bg-background">
+                  <option value="gpt5">GPT‑5 mini (Analyse)</option>
+                  <option value="finbert">FinBERT (Sentiment)</option>
+                </select>
+                <select value={lang} onChange={e => setLang(e.target.value as Lang)} className="border rounded px-2 py-1 bg-background">
+                  <option value="da">Dansk</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
             </div>
 
             <div className="mt-3">
@@ -109,7 +118,9 @@ export default function ChatWidget() {
               <textarea
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
-                placeholder={lang === 'da' ? 'Skriv dit spørgsmål...' : 'Type your question...'}
+                placeholder={model === 'finbert'
+                  ? (lang === 'da' ? 'Spørg om nyhedssentiment, fx: "Hvordan er stemningen for AAPL?"' : 'Ask for news sentiment, e.g., "What is the sentiment for AAPL?"')
+                  : (lang === 'da' ? 'Skriv dit spørgsmål om fundamental/teknisk analyse...' : 'Ask about fundamental/technical analysis...')}
                 className="w-full border rounded p-2 bg-background"
                 rows={4}
               />

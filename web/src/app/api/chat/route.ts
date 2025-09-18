@@ -1,12 +1,21 @@
 export const runtime = 'nodejs'
 
-// Minimal server-side chat proxy with model fallback and Supabase data summarization
-// Expects env: HF_API_TOKEN, HF_MODEL_ID_PRIMARY, HF_MODEL_ID_FALLBACK (optional), SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
+// Server-side chat proxy with selectable engines and Supabase data summarization
+// Engines:
+// - model: 'finbert'  -> Hugging Face text-classification (ProsusAI/finbert) on recent news headlines
+// - model: 'gpt5'     -> OpenAI Chat Completions (gpt-5-mini) for fundamental/technical analysis (includes FinBERT sentiment summary if available)
+// Existing support (legacy): HF text-generation fallback list when no model specified
+// Env expected:
+//   HF_API_TOKEN (for HF calls), OPENAI_API_KEY (for gpt5),
+//   HF_MODEL_ID_PRIMARY / HF_MODEL_ID_FALLBACK / HF_MODEL_LIST (legacy gen models),
+//   HF_FINBERT_ID (default ProsusAI/finbert),
+//   SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET
 
 type ChatBody = {
   prompt: string
   tickers?: string[]
   lang?: 'da' | 'en'
+  model?: 'finbert' | 'gpt5'
   sessionId?: string
 }
 
@@ -98,15 +107,100 @@ async function callHF(inputs: string, modelId: string, signal?: AbortSignal) {
   return extractTextFromHF(json)
 }
 
+// --- News fetching & FinBERT sentiment ---
+function googleNewsUrl(query: string, lang: 'da'|'en') {
+  const base = 'https://news.google.com/rss/search'
+  const hl = lang === 'da' ? 'da' : 'en-US'
+  const gl = lang === 'da' ? 'DK' : 'US'
+  const ceid = lang === 'da' ? 'DK:da' : 'US:en'
+  const q = encodeURIComponent(query)
+  return `${base}?q=${q}&hl=${hl}&gl=${gl}&ceid=${ceid}`
+}
+
+function parseRssItems(xml: string): { title: string, link?: string }[] {
+  const items: { title: string, link?: string }[] = []
+  const itemRe = /<item[\s\S]*?<\/item>/g
+  const titleRe = /<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/
+  const linkRe = /<link>(.*?)<\/link>/
+  for (const m of xml.matchAll(itemRe)) {
+    const block = m[0]
+    const t = block.match(titleRe)
+    const l = block.match(linkRe)
+    const title = (t?.[1] || t?.[2] || '').trim()
+    const link = (l?.[1] || '').trim()
+    if (title) items.push({ title, link })
+  }
+  return items
+}
+
+async function fetchNewsHeadlines(tickers: string[], lang: 'da'|'en', perTicker = 8) {
+  const headlines: string[] = []
+  for (const t of tickers) {
+    const query = lang === 'da' ? `${t} aktie` : `${t} stock`
+    const url = googleNewsUrl(query, lang)
+    try {
+      const r = await fetch(url)
+      const xml = await r.text()
+      const items = parseRssItems(xml).slice(0, perTicker)
+      for (const it of items) { if (it.title) headlines.push(it.title) }
+    } catch {}
+  }
+  // de-dup
+  return Array.from(new Set(headlines)).slice(0, 20)
+}
+
+async function classifyWithFinBert(texts: string[]) {
+  if (!texts.length) return { counts: { POSITIVE: 0, NEGATIVE: 0, NEUTRAL: 0 }, details: [] as any[] }
+  const token = env('HF_API_TOKEN') as string
+  const modelId = (env('HF_FINBERT_ID', false) as string) || 'ProsusAI/finbert'
+  const r = await fetch(`https://api-inference.huggingface.co/models/${modelId}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs: texts })
+  })
+  const text = await r.text()
+  let json: any
+  try { json = JSON.parse(text) } catch { json = text }
+  if (!r.ok) {
+    const msg = typeof json === 'string' ? json : JSON.stringify(json)
+    throw new Error(`HF ${modelId} error ${r.status}: ${msg}`)
+  }
+  // Expected: Array of arrays of {label,score}
+  const counts = { POSITIVE: 0, NEGATIVE: 0, NEUTRAL: 0 } as Record<string, number>
+  const details: { text: string, label: string, score: number }[] = []
+  if (Array.isArray(json)) {
+    json.forEach((arr: any, i: number) => {
+      const best = Array.isArray(arr) ? arr.reduce((a: any, b: any) => (a?.score > b?.score ? a : b), null) : null
+      if (best?.label) {
+        counts[best.label] = (counts[best.label] || 0) + 1
+        details.push({ text: texts[i], label: best.label, score: best.score })
+      }
+    })
+  }
+  return { counts, details }
+}
+
+// --- OpenAI GPT-5 mini ---
+async function callOpenAI(messages: any[]) {
+  const key = env('OPENAI_API_KEY') as string
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-5-mini', messages, temperature: 0.3, max_tokens: 800 })
+  })
+  const j = await r.json()
+  if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
+  return j?.choices?.[0]?.message?.content || ''
+}
+
 export async function POST(req: Request) {
   try {
-    const { prompt, tickers = [], lang = 'da', sessionId }: ChatBody = await req.json()
+    const { prompt, tickers = [], lang = 'da', sessionId, model }: ChatBody = await req.json()
     if (!prompt || !prompt.trim()) {
       return new Response(JSON.stringify({ error: 'Missing prompt' }), { status: 400, headers: { 'content-type': 'application/json' } })
     }
     const safeTickers = Array.isArray(tickers) ? tickers.slice(0, 10) : [] // cap number for token budget
 
-    // Load and summarize data
+    // Load and summarize numeric data (used by gpt5 and legacy)
     const summaries: string[] = []
     for (const t of safeTickers) {
       try {
@@ -117,45 +211,81 @@ export async function POST(req: Request) {
       }
     }
 
-    const input = buildInput(lang, prompt, summaries)
-
-    const configuredList = ((env('HF_MODEL_LIST', false) as string) || '')
-      .split(',').map(s => s.trim()).filter(Boolean)
-    const primary = (env('HF_MODEL_ID_PRIMARY', false) as string) || (env('HF_MODEL_ID', false) as string)
-    const fallback = (env('HF_MODEL_ID_FALLBACK', false) as string)
-
-    const candidates = Array.from(new Set([
-      ...configuredList,
-      primary,
-      fallback,
-      // Common known variants
-      'TheFinAI/finma-7b-full',
-      'ChanceFocus/finma-7b-full',
-      'TheFinAI/finma-7b-nlp',
-      'ChanceFocus/finma-7b-nlp',
-      'TheFinAI/FinMA-7B-NLP',
-      'ChanceFocus/FinMA-7B-NLP',
-    ].filter(Boolean)))
-
     let answer = ''
     let usedModel = ''
-    const errors: string[] = []
-    for (const m of candidates) {
+
+    if (model === 'finbert') {
+      // Sentiment on recent news headlines via FinBERT
+      const headlines = await fetchNewsHeadlines(safeTickers, lang)
+      if (!headlines.length) {
+        const msg = lang === 'da' ? 'Ingen nyheder fundet for valgte tickers.' : 'No news found for selected tickers.'
+        answer = `${msg}\n\nTickers: ${safeTickers.join(', ')}`
+        usedModel = (env('HF_FINBERT_ID', false) as string) || 'ProsusAI/finbert'
+      } else {
+        const res = await classifyWithFinBert(headlines)
+        const counts = res.counts
+        const header = lang === 'da' ? 'FinBERT sentiment (overskrifter)' : 'FinBERT sentiment (headlines)'
+        const lines = [
+          `${header}: POS=${counts.POSITIVE} | NEU=${counts.NEUTRAL} | NEG=${counts.NEGATIVE}`,
+          '',
+          ...(res.details.slice(0, 8).map(d => `- [${d.label}] ${d.text}`)),
+        ]
+        answer = lines.join('\n')
+        usedModel = (env('HF_FINBERT_ID', false) as string) || 'ProsusAI/finbert'
+      }
+    } else if (model === 'gpt5') {
+      // Analysis via GPT-5 mini, include FinBERT sentiment summary if possible
+      let sentimentLine = ''
       try {
-        answer = await callHF(input, m)
-        usedModel = m
-        break
-      } catch (e: any) {
-        errors.push(`${m}: ${e?.message || 'error'}`)
+        const headlines = await fetchNewsHeadlines(safeTickers, lang)
+        if (headlines.length) {
+          const res = await classifyWithFinBert(headlines)
+          sentimentLine = `FinBERT sentiment: POS=${res.counts.POSITIVE} | NEU=${res.counts.NEUTRAL} | NEG=${res.counts.NEGATIVE}`
+        }
+      } catch {}
+      const system = lang === 'da'
+        ? 'Du er en finansiel assistent. Lav kort, klar analyse baseret p9 tal (fundamental/teknisk).'
+        : 'You are a financial assistant. Produce concise, clear analysis based on fundamentals/technicals.'
+      const user = [
+        summaries.length ? `Data:\n- ${summaries.join('\n- ')}` : '',
+        sentimentLine,
+        '',
+        (lang === 'da' ? 'Sp 0f8rgsm 0e5l:' : 'Question:'),
+        prompt
+      ].filter(Boolean).join('\n')
+      answer = await callOpenAI([
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ])
+      usedModel = 'gpt-5-mini'
+    } else {
+      // Legacy: Hugging Face text-generation model(s) with fallback list (FinMA etc.)
+      const input = buildInput(lang, prompt, summaries)
+      const configuredList = ((env('HF_MODEL_LIST', false) as string) || '')
+        .split(',').map(s => s.trim()).filter(Boolean)
+      const primary = (env('HF_MODEL_ID_PRIMARY', false) as string) || (env('HF_MODEL_ID', false) as string)
+      const fallback = (env('HF_MODEL_ID_FALLBACK', false) as string)
+      const candidates = Array.from(new Set([
+        ...configuredList,
+        primary,
+        fallback,
+        'TheFinAI/finma-7b-full',
+        'ChanceFocus/finma-7b-full',
+        'TheFinAI/finma-7b-nlp',
+        'ChanceFocus/finma-7b-nlp',
+        'TheFinAI/FinMA-7B-NLP',
+        'ChanceFocus/FinMA-7B-NLP',
+      ].filter(Boolean)))
+      const errors: string[] = []
+      for (const m of candidates) {
+        try { answer = await callHF(input, m); usedModel = m; break } catch (e: any) { errors.push(`${m}: ${e?.message || 'error'}`) }
+      }
+      if (!usedModel) {
+        return new Response(JSON.stringify({ error: 'All model candidates failed', candidates, errors }), { status: 502, headers: { 'content-type': 'application/json' } })
       }
     }
 
-    if (!usedModel) {
-      return new Response(JSON.stringify({ error: 'All model candidates failed', candidates, errors }), { status: 502, headers: { 'content-type': 'application/json' } })
-    }
-
     // Optional: log to Supabase (if tables exist). Best-effort; ignore failures.
-    // NOTE: For proper logging, create tables chat_sessions and chat_messages as described in README.
     ;(async () => {
       try {
         if (process.env.CHAT_LOGGING !== '1') return
