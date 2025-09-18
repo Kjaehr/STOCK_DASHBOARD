@@ -8,12 +8,13 @@ function env(name: string): string {
 
 const TTL_SECONDS = Number(process.env.DATA_TTL_SECONDS || '60')
 
-export async function GET(req: Request, ctx: { params: { path?: string[] } }) {
+// Note: Avoid strict typing of the route handler context to satisfy Next.js build validation across versions
+export async function GET(req: Request, context: any) {
   const SUPABASE_URL = env('SUPABASE_URL')
   const SUPABASE_KEY = env('SUPABASE_KEY') // Use anon or service; do NOT expose on client
   const SUPABASE_BUCKET = env('SUPABASE_BUCKET')
 
-  const segments = (ctx.params.path || [])
+  const segments = (context?.params?.path ?? []) as string[]
   if (!segments.length) {
     return new Response(JSON.stringify({ error: 'Missing object path (e.g. /api/data/meta.json)' }), { status: 400, headers: { 'content-type': 'application/json' } })
   }
