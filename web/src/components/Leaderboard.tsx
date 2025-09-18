@@ -86,6 +86,27 @@ export default function Leaderboard() {
   function toggleSort(key: SortKey) {
     setSort(s => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'ticker' ? 'asc' : 'desc' })
   }
+  // Helper to update URL immediately (avoid race with effects)
+  function replaceUrlFromState(statePreset: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR' = preset) {
+    if (!router || !pathname) return
+    const params = new URLSearchParams(sp?.toString() || '')
+    // keep current state
+    if (q) params.set('q', q); else params.delete('q')
+    if (statePreset && statePreset !== 'NONE') params.set('p', statePreset); else params.delete('p')
+    if (onlyPriced) params.set('op', '1'); else params.delete('op')
+    const isDefaultSort = sort.key === 'score' && sort.dir === 'desc'
+    if (!isDefaultSort) { params.set('s', sort.key); params.set('d', sort.dir) } else { params.delete('s'); params.delete('d') }
+    const next = `${pathname}${params.toString() ? `?${params.toString()}` : ''}`
+    const current = `${pathname}${sp && sp.toString() ? `?${sp.toString()}` : ''}`
+    if (next !== current) router.replace(next, { scroll: false })
+  }
+
+  function handlePreset(p: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR') {
+    setPreset(p)
+    // update URL immediately to make state sticky
+    replaceUrlFromState(p)
+  }
+
 
   const [newTicker, setNewTicker] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
@@ -274,12 +295,14 @@ export default function Leaderboard() {
             }
           }}
         />
+        <span className="text-xs text-muted-foreground hidden sm:inline">Shortcuts: "/" focus, Enter opens</span>
+
         <Button variant="outline" size="sm" onClick={()=>fetchAll(true)} disabled={loading}>{loading ? 'Refreshing...' : 'Refresh'}</Button>
         <small className="text-xs text-muted-foreground">Updated: {meta?.generated_at ?? '--'} {usingCache ? '(cache)' : ''}</small>
         <Badge variant="outline" className="font-normal" title="DATA_BASE endpoint">Endpoint: {DATA_BASE}</Badge>
         <div className="flex items-center gap-1">
           {(['NONE','HIGH_MOM','UNDERVALUED','LOW_ATR'] as const).map(p => (
-            <Button key={p} size="sm" variant={preset===p? 'default':'outline'} aria-pressed={preset===p} onClick={()=>setPreset(p)}>
+            <Button key={p} size="sm" variant={preset===p? 'default':'outline'} aria-pressed={preset===p} onClick={()=>handlePreset(p)}>
               {p==='NONE'?'All':p==='HIGH_MOM'?'High mom':p==='UNDERVALUED'?'Undervalued':'Low ATR%'}
             </Button>
           ))}
