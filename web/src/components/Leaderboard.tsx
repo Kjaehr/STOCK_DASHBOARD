@@ -82,9 +82,8 @@ export default function Leaderboard() {
   const sp = useSearchParams()
 
 
-  // Derive active preset from URL when available to avoid remount/reset issues
-  const presetFromUrl = (sp?.get('p') as 'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null) ?? null
-  const activePreset: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR' = presetFromUrl ?? preset
+  // Active preset is the component state; URL is just a reflection
+  const activePreset: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR' = preset
 
   type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'score', dir: 'desc' })
@@ -112,7 +111,6 @@ export default function Leaderboard() {
     replaceUrlFromState(p)
   }
 
-  const didInitFromUrlRef = useRef(false)
 
 
   const [newTicker, setNewTicker] = useState('')
@@ -137,16 +135,14 @@ export default function Leaderboard() {
   useEffect(() => {
     const params = new URLSearchParams(sp?.toString() || '')
     const urlQ = params.get('q') ?? null
-    const urlP = params.get('p') as any | null
+    const urlP = (params.get('p') as 'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'|null) ?? null
     const urlOP = params.get('op') === '1'
     const urlS = (params.get('s') as any) || 'score'
     const urlD = (params.get('d') as any) || 'desc'
     if (urlQ !== null && urlQ !== q) setQ(urlQ)
-    // Initialize preset from URL only once to avoid bouncing back to 'All'
-    if (!didInitFromUrlRef.current) {
-      if (urlP !== null && urlP !== preset) setPreset(urlP)
-      didInitFromUrlRef.current = true
-    }
+    // Sync preset from URL every time (URL -> state). Default to 'NONE' when absent.
+    const nextPreset = (urlP ?? 'NONE') as 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR'
+    if (nextPreset !== preset) setPreset(nextPreset)
     if (urlOP !== onlyPriced) setOnlyPriced(urlOP)
     if (urlS !== sort.key || urlD !== sort.dir) setSort({ key: urlS as any, dir: urlD as any })
   }, [sp])
@@ -257,7 +253,7 @@ export default function Leaderboard() {
       if (na === nb) return 0
       return na > nb ? 1*dir : -1*dir
     })
-  }, [items, q, preset, sp, onlyPriced, sort])
+  }, [items, q, preset, onlyPriced, sort])
 
   function addToPortfolio(t: string, price?: number | null) {
     try {
