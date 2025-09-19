@@ -7,6 +7,8 @@ import { sma, rsi14, atr14 } from '../../../lib/indicators'
 
 export const runtime = 'nodejs'
 export const revalidate = 900 // 15 min route cache window (advisory)
+(yahooFinance as any).suppressNotices?.(['ripHistorical'])
+
 
 function bypass(req: Request): boolean {
   try {
@@ -46,7 +48,18 @@ export async function GET(req: Request) {
 
   async function fetchOne(t: string) {
     try {
-      const hist = await yahooFinance.historical(t, { period1: '2y', interval: '1d' })
+      const ch: any = await yahooFinance.chart(t, { range: '2y', interval: '1d' })
+      let hist: any[] = Array.isArray(ch?.quotes) && ch.quotes.length ? ch.quotes : []
+      if (!hist.length) {
+        const ts: number[] = ch?.timestamp || []
+        const q = ch?.indicators?.quote?.[0] || {}
+        hist = ts.map((tsVal: number, i: number) => ({
+          date: new Date(tsVal * 1000),
+          close: q?.close?.[i],
+          high: q?.high?.[i],
+          low: q?.low?.[i],
+        })).filter(x => Number.isFinite(x.close) && Number.isFinite(x.high) && Number.isFinite(x.low))
+      }
       if (!hist?.length) throw new Error('no price data')
       const close = hist.map(x => Number(x.close))
       const high = hist.map(x => Number(x.high))
