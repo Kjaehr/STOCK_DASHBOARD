@@ -208,14 +208,24 @@ async function classifyWithFinBert(texts: string[]) {
 // --- OpenAI GPT-5 mini ---
 async function callOpenAI(messages: any[]) {
   const key = env('OPENAI_API_KEY') as string
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-5-mini', messages, max_completion_tokens: 800 })
-  })
-  const j = await r.json()
-  if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
-  return j?.choices?.[0]?.message?.content || ''
+  const ac = new AbortController()
+  const timeout = setTimeout(() => ac.abort('timeout'), 30000)
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-mini', messages, max_completion_tokens: 800 }),
+      signal: ac.signal,
+    })
+    const j = await r.json()
+    if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
+    return j?.choices?.[0]?.message?.content || ''
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw new Error('OpenAI timeout (30s)')
+    throw e
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 export async function POST(req: Request) {
@@ -270,13 +280,13 @@ export async function POST(req: Request) {
         }
       } catch {}
       const system = lang === 'da'
-        ? 'Du er en finansiel assistent. Lav kort, klar analyse baseret p9 tal (fundamental/teknisk).'
+        ? 'Du er en finansiel assistent. Lav kort, klar analyse baseret på tal (fundamental/teknisk).'
         : 'You are a financial assistant. Produce concise, clear analysis based on fundamentals/technicals.'
       const user = [
         summaries.length ? `Data:\n- ${summaries.join('\n- ')}` : '',
         sentimentLine,
         '',
-        (lang === 'da' ? 'Sp 0f8rgsm 0e5l:' : 'Question:'),
+        (lang === 'da' ? 'Spørgsmål:' : 'Question:'),
         prompt
       ].filter(Boolean).join('\n')
       answer = await callOpenAI([
