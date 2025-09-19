@@ -203,17 +203,52 @@ export default function Leaderboard() {
       setError(null)
       const bust = `?t=${Date.now()}`
       const metaJson = await fetch(`${DATA_BASE}/meta.json${force ? bust : ''}`, { cache: force ? 'no-store' : 'default' }).then(r => { if (!r.ok) throw new Error(`meta ${r.status}`); return r.json() as Promise<StockMeta> })
-      setMeta(metaJson)
-      writeCache(META_CACHE_KEY, metaJson)
       const tickers = metaJson.tickers ?? []
-      const results = await Promise.allSettled(
-        tickers.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json${force ? bust : ''}`, { cache: force ? 'no-store' : 'default' }).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
-      )
-      const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
-      setItems(ok)
-      writeCache(LIST_CACHE_KEY, ok)
-      ok.forEach(row => writeCache(`${TICKER_CACHE_PREFIX}${row.ticker}`, row))
-      setUsingCache(false)
+
+      if (force) {
+        // Live refresh via runtime screener API in batches (≤10 per request)
+        const chunks: string[][] = []
+        for (let i = 0; i < tickers.length; i += 10) chunks.push(tickers.slice(i, i + 10))
+        const calls = chunks.map(async chunk => {
+          const qs = encodeURIComponent(chunk.join(','))
+          const resp = await fetch(`/api/screener?tickers=${qs}&refresh=1`, { cache: 'no-store' }).then(r => r.json() as Promise<{ generated_at: string; items: any[] }>)
+          return resp
+        })
+        const responses = await Promise.allSettled(calls)
+        const itemsLive: StockData[] = responses.flatMap(r => {
+          if (r.status !== 'fulfilled') return []
+          return (r.value.items || []).map((it: any) => ({
+            ticker: it.ticker,
+            price: it.price ?? null,
+            score: it.score ?? null,
+            fund_points: it.fund_points ?? null,
+            tech_points: it.tech_points ?? null,
+            sent_points: it.sent_points ?? null,
+            flags: it.flags ?? [],
+            technicals: it.technicals ?? {},
+            sentiment: it.sentiment ?? {},
+          } as StockData))
+        })
+        setItems(itemsLive)
+        // Update meta with screener timestamp, keep tickers list
+        setMeta({ generated_at: new Date().toISOString(), tickers } as any)
+        writeCache(LIST_CACHE_KEY, itemsLive)
+        itemsLive.forEach(row => writeCache(`${TICKER_CACHE_PREFIX}${row.ticker}`, row))
+        writeCache(META_CACHE_KEY, { generated_at: new Date().toISOString(), tickers } as any)
+        setUsingCache(false)
+      } else {
+        // Default: fetch from Supabase-backed JSONs (fast path)
+        setMeta(metaJson)
+        writeCache(META_CACHE_KEY, metaJson)
+        const results = await Promise.allSettled(
+          tickers.map(t => fetch(`${DATA_BASE}/${t.replace(/\s+/g,'_')}.json${force ? bust : ''}`, { cache: force ? 'no-store' : 'default' }).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() as Promise<StockData> }))
+        )
+        const ok = results.flatMap(r => r.status === 'fulfilled' ? [r.value as StockData] : [])
+        setItems(ok)
+        writeCache(LIST_CACHE_KEY, ok)
+        ok.forEach(row => writeCache(`${TICKER_CACHE_PREFIX}${row.ticker}`, row))
+        setUsingCache(false)
+      }
     } catch (e) {
       console.error('Failed to load data', e)
       setError('Failed to load leaderboard data.')
