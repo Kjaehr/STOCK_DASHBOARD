@@ -156,9 +156,11 @@ export default function ChatWidget() {
                 <div key={m.id} className={`flex items-start gap-2 ${m.role === 'user' ? 'justify-end' : ''}`}>
                   {m.role === 'assistant' && <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><MessageSquare className="h-4 w-4" /></div>}
                   <div className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm shadow-sm ${m.role === 'user' ? 'bg-primary text-primary-foreground rounded-tr-sm' : 'bg-card/60 backdrop-blur'}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} className="prose prose-invert prose-sm max-w-none">
-                      {m.content}
-                    </ReactMarkdown>
+                    <div className="prose prose-invert prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {m.content}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 </div>
               ))}
