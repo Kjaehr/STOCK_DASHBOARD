@@ -3,7 +3,7 @@ import Parser from 'rss-parser'
 // vader-sentiment types are not strict; import as any
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { SentimentIntensityAnalyzer: VADER } = require('vader-sentiment')
-import { sma, rsi14, atr14 } from '@/lib/indicators'
+import { sma, rsi14, atr14 } from '../../../lib/indicators'
 
 export const runtime = 'nodejs'
 export const revalidate = 900 // 15 min route cache window (advisory)
