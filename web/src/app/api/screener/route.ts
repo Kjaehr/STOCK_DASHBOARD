@@ -77,9 +77,10 @@ export async function GET(req: Request) {
       const atrPct = atr[last] != null && price ? (atr[last]! / price) * 100 : null
       const trendUp = (sma50[last] != null && sma200[last] != null && price != null) ? ((sma50[last]! > sma200[last]!) && (price > sma200[last]!)) : false
 
-      // Fundamentals (best-effort) – be tolerant to API/type shape
-      const sum = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'financialData', 'price', 'majorHoldersBreakdown', 'summaryDetail'] as any }).catch(() => null)
-      const qs: any = sum as any
+      // Fundamentals (best-effort) – fetch in two passes and be tolerant to API/type shape
+      const sumA = await yahooFinance.quoteSummary(t, { modules: ['financialData', 'price'] as any }).catch(() => null)
+      const sumB = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'majorHoldersBreakdown', 'summaryDetail'] as any }).catch(() => null)
+      const qs: any = { ...(sumA as any || {}), ...(sumB as any || {}) }
       const mcap = safeNum(qs?.price?.marketCap?.raw ?? qs?.price?.marketCap)
       const fcf = safeNum(qs?.financialData?.freeCashflow?.raw ?? qs?.financialData?.freeCashflow ?? qs?.defaultKeyStatistics?.freeCashflow?.raw ?? qs?.defaultKeyStatistics?.freeCashflow)
       const ebitda = safeNum(qs?.financialData?.ebitda?.raw ?? qs?.financialData?.ebitda)
@@ -94,26 +95,11 @@ export async function GET(req: Request) {
 
       function scoreFundamentals() {
         let pts = 0
-        // FCF Yield (max 12)
-        if (fcfYield != null) {
-          if (fcfYield > 0.08) pts += 12; else if (fcfYield >= 0.04) pts += 8; else if (fcfYield >= 0) pts += 4
-        }
-        // NetDebt/EBITDA (max 8)
-        if (ndToEbitda != null) {
-          if (ndToEbitda < 1) pts += 8; else if (ndToEbitda < 2) pts += 5; else if (ndToEbitda < 3) pts += 2
-        }
-        // Gross margin (max 8)
-        if (grossMargin != null) {
-          if (grossMargin > 0.45) pts += 8; else if (grossMargin >= 0.30) pts += 4
-        }
-        // Revenue growth (max 6)
-        if (revenueGrowth != null) {
-          if (revenueGrowth > 0.15) pts += 6; else if (revenueGrowth >= 0.05) pts += 3; else if (revenueGrowth >= 0) pts += 1
-        }
-        // Insider own (max 6)
-        if (insiderOwn != null) {
-          if (insiderOwn >= 0.10) pts += 6; else if (insiderOwn >= 0.03) pts += 3
-        }
+        if (fcfYield != null) { if (fcfYield > 0.08) pts += 12; else if (fcfYield >= 0.04) pts += 8; else if (fcfYield >= 0) pts += 4 }
+        if (ndToEbitda != null) { if (ndToEbitda < 1) pts += 8; else if (ndToEbitda < 2) pts += 5; else if (ndToEbitda < 3) pts += 2 }
+        if (grossMargin != null) { if (grossMargin > 0.45) pts += 8; else if (grossMargin >= 0.30) pts += 4 }
+        if (revenueGrowth != null) { if (revenueGrowth > 0.15) pts += 6; else if (revenueGrowth >= 0.05) pts += 3; else if (revenueGrowth >= 0) pts += 1 }
+        if (insiderOwn != null) { if (insiderOwn >= 0.10) pts += 6; else if (insiderOwn >= 0.03) pts += 3 }
         return pts
       }
       const fundPoints = scoreFundamentals()
@@ -140,6 +126,10 @@ export async function GET(req: Request) {
         insider_own: insiderOwn,
       }
 
+      const flags: string[] = []
+      const allNull = [fcfYield, ndToEbitda, grossMargin, revenueGrowth, insiderOwn].every(v => v == null)
+      if (allNull) flags.push('fundamentals_missing')
+
       return {
         ticker: t,
         price,
@@ -150,7 +140,7 @@ export async function GET(req: Request) {
         fund_points: fundPoints,
         tech_points: techPoints,
         sent_points: sentPoints,
-        flags: [],
+        flags,
         fundamentals,
         technicals: { provider: 'yahoo', rsi: rsi[last], atr_pct: atrPct, sma50: sma50[last], sma200: sma200[last] },
         sentiment: { mean7, count7: last7.length },
