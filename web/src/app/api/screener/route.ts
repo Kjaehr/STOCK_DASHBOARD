@@ -63,11 +63,12 @@ export async function GET(req: Request) {
       const atrPct = atr[last] != null && price ? (atr[last]! / price) * 100 : null
       const trendUp = (sma50[last] != null && sma200[last] != null && price != null) ? ((sma50[last]! > sma200[last]!) && (price > sma200[last]!)) : false
 
-      // Fundamentals (best-effort)
+      // Fundamentals (best-effort) – be tolerant to API/type shape
       const sum = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'financialData', 'price'] }).catch(() => null)
-      const mcap = safeNum(sum?.price?.marketCap)
-      const fcf = safeNum(sum?.defaultKeyStatistics?.freeCashflow)
-      const ebitda = safeNum(sum?.financialData?.ebitda)
+      const qs: any = sum as any
+      const mcap = safeNum(qs?.price?.marketCap?.raw ?? qs?.price?.marketCap)
+      const fcf = safeNum(qs?.financialData?.freeCashflow?.raw ?? qs?.financialData?.freeCashflow ?? qs?.defaultKeyStatistics?.freeCashflow?.raw ?? qs?.defaultKeyStatistics?.freeCashflow)
+      const ebitda = safeNum(qs?.financialData?.ebitda?.raw ?? qs?.financialData?.ebitda)
       const fcfYield = (fcf != null && mcap != null && mcap > 0) ? (fcf / mcap) : null
 
       // News + VADER
