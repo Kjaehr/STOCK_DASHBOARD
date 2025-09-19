@@ -7,7 +7,7 @@ import { sma, rsi14, atr14 } from '../../../lib/indicators'
 
 export const runtime = 'nodejs'
 export const revalidate = 900 // 15 min route cache window (advisory)
-(yahooFinance as any).suppressNotices?.(['ripHistorical'])
+;(yahooFinance as any).suppressNotices && (yahooFinance as any).suppressNotices(['ripHistorical'])
 
 
 function bypass(req: Request): boolean {
