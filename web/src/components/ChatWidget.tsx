@@ -4,7 +4,7 @@ import React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TextareaAutosize from 'react-textarea-autosize'
-import { Bot, MessageSquare, Send, X, Loader2 } from 'lucide-react'
+import { MessageSquare, Send, X, Loader2 } from 'lucide-react'
 
 type Meta = { tickers?: string[] }
 
@@ -154,7 +154,7 @@ export default function ChatWidget() {
             <div className="mt-3 space-y-3 max-h-56 overflow-auto pr-1">
               {messages.map(m => (
                 <div key={m.id} className={`flex items-start gap-2 ${m.role === 'user' ? 'justify-end' : ''}`}>
-                  {m.role === 'assistant' && <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><Bot className="h-4 w-4" /></div>}
+                  {m.role === 'assistant' && <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><MessageSquare className="h-4 w-4" /></div>}
                   <div className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm shadow-sm ${m.role === 'user' ? 'bg-primary text-primary-foreground rounded-tr-sm' : 'bg-card/60 backdrop-blur'}`}>
                     <ReactMarkdown remarkPlugins={[remarkGfm]} className="prose prose-invert prose-sm max-w-none">
                       {m.content}
@@ -164,7 +164,7 @@ export default function ChatWidget() {
               ))}
               {sending && (
                 <div className="flex items-start gap-2 opacity-80">
-                  <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><Bot className="h-4 w-4" /></div>
+                  <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><MessageSquare className="h-4 w-4" /></div>
                   <div className="rounded-2xl border bg-card/60 backdrop-blur px-3 py-2 text-sm">
                     <div className="typing-dots"><span>.</span><span>.</span><span>.</span></div>
                   </div>
