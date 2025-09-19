@@ -142,7 +142,7 @@ async function fetchNewsHeadlines(tickers: string[], lang: 'da'|'en', perTicker 
   const headlines: string[] = []
   for (const t of tickers) {
     const name = NAME_MAP[t]
-    const baseTerms = lang === 'da' ? ['aktie'] : ['stock']
+    const baseTerms = lang === 'da' ? ['aktie','nyheder'] : ['stock','news']
     const terms = Array.from(new Set([
       t,
       ...(name ? [name] : []),
@@ -195,8 +195,10 @@ async function classifyWithFinBert(texts: string[]) {
     json.forEach((arr: any, i: number) => {
       const best = Array.isArray(arr) ? arr.reduce((a: any, b: any) => (a?.score > b?.score ? a : b), null) : null
       if (best?.label) {
-        counts[best.label] = (counts[best.label] || 0) + 1
-        details.push({ text: texts[i], label: best.label, score: best.score })
+        const raw = String(best.label || '').toLowerCase()
+        const cat = raw === 'positive' ? 'POSITIVE' : raw === 'negative' ? 'NEGATIVE' : 'NEUTRAL'
+        counts[cat] = (counts[cat] || 0) + 1
+        details.push({ text: texts[i], label: raw, score: best.score })
       }
     })
   }
@@ -209,7 +211,7 @@ async function callOpenAI(messages: any[]) {
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-5-mini', messages, temperature: 0.3, max_completion_tokens: 800 })
+    body: JSON.stringify({ model: 'gpt-5-mini', messages, max_completion_tokens: 800 })
   })
   const j = await r.json()
   if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
