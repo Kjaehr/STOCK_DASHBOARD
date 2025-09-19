@@ -37,7 +37,8 @@ async function fetchTickerFromSupabase(ticker: string) {
 
 function summarizeTicker(ticker: string, data: any): string {
   // Extract and compact key points; guard for missing fields
-  const p = (k: string, d?: any) => (d == null ? '—' : d)
+  const fmtPct = (v?: any) => (v == null ? '—' : `${Math.round(Number(v) * 1000) / 10}%`)
+  const fmtNum = (v?: any) => (v == null ? '—' : String(v))
   const parts: string[] = []
   parts.push(`Ticker: ${ticker}`)
   if (data.score != null) parts.push(`score=${data.score}`)
@@ -48,9 +49,26 @@ function summarizeTicker(ticker: string, data: any): string {
   if (data.sma50 != null) parts.push(`sma50=${data.sma50}`)
   if (data.sma200 != null) parts.push(`sma200=${data.sma200}`)
   if (data.rs_ratio != null) parts.push(`rs=${data.rs_ratio}`)
+  // Add key fundamentals when available
+  const f = data.fundamentals || {}
+  if (f.fcf_yield != null) parts.push(`fcf_yield=${fmtPct(f.fcf_yield)}`)
+  if (f.nd_to_ebitda != null) parts.push(`nd/ebitda=${fmtNum(f.nd_to_ebitda)}`)
+  if (f.gross_margin != null) parts.push(`gm=${fmtPct(f.gross_margin)}`)
+  if (f.revenue_growth != null) parts.push(`rev_g=${fmtPct(f.revenue_growth)}`)
+  if (f.insider_own != null) parts.push(`insider=${fmtPct(f.insider_own)}`)
+  if (f.pe != null) parts.push(`pe=${fmtNum(f.pe)}`)
+  if (f.fwd_pe != null) parts.push(`fpe=${fmtNum(f.fwd_pe)}`)
+  if (f.peg != null) parts.push(`peg=${fmtNum(f.peg)}`)
+  if (f.p_s != null) parts.push(`ps=${fmtNum(f.p_s)}`)
+  if (f.p_b != null) parts.push(`pb=${fmtNum(f.p_b)}`)
+  if (f.ev_to_ebitda != null) parts.push(`ev/ebitda=${fmtNum(f.ev_to_ebitda)}`)
+  // Useful technicals
+  const t = data.technicals || {}
+  if (t.rsi != null) parts.push(`rsi=${fmtNum(t.rsi)}`)
+  if (t.atr_pct != null) parts.push(`atr%=${fmtNum(t.atr_pct)}`)
   if (data.position_health) parts.push(`pos=${data.position_health}`)
   if (Array.isArray(data.buy_zones) && data.buy_zones.length) {
-    const zones = data.buy_zones.slice(0, 2).map((z: any) => `${p('l', z.low)}-${p('h', z.high)}`).join(', ')
+    const zones = data.buy_zones.slice(0, 2).map((z: any) => `${fmtNum(z.low)}-${fmtNum(z.high)}`).join(', ')
     parts.push(`buy_zones=${zones}`)
   }
   return parts.join(' | ')
@@ -273,7 +291,7 @@ async function callOpenAI(messages: any[]) {
     let r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-5-mini', input, max_output_tokens: 800 }),
+      body: JSON.stringify({ model: 'gpt-5-mini', input, max_output_tokens: 1800 }),
       signal: ac.signal,
     })
     if (!r.ok) {
@@ -284,7 +302,7 @@ async function callOpenAI(messages: any[]) {
         r = await fetch('https://api.openai.com/v1/responses', {
           method: 'POST',
           headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'gpt-5-mini', input, max_completion_tokens: 800 }),
+          body: JSON.stringify({ model: 'gpt-5-mini', input, max_completion_tokens: 1800 }),
           signal: ac.signal,
         })
       } else if (/unknown_endpoint|use responses/i.test(String(msg))) {
@@ -310,6 +328,81 @@ async function callOpenAI(messages: any[]) {
   }
 }
 
+// Stream OpenAI Chat Completions as plain text chunks
+async function streamOpenAIChat(messages: any[]) {
+  const key = env('OPENAI_API_KEY') as string
+  const ac = new AbortController()
+  const timeout = setTimeout(() => ac.abort('timeout'), 60000)
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-mini', messages, stream: true, temperature: 0.2 }),
+      signal: ac.signal,
+    })
+    if (!r.ok || !r.body) {
+      // Fallback: non-stream call, then stream once
+      const full = await callOpenAI(messages)
+      const enc = new TextEncoder()
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(enc.encode(full))
+          controller.close()
+        }
+      })
+    }
+    const reader = r.body.getReader()
+    const dec = new TextDecoder()
+    const enc = new TextEncoder()
+    let buffer = ''
+    let doneOuter = false
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (doneOuter) return controller.close()
+        const { value, done } = await reader.read()
+        if (done) {
+          doneOuter = true
+          controller.close()
+          return
+        }
+        buffer += dec.decode(value, { stream: true })
+        // Parse SSE lines
+        let idx: number
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).trim()
+          buffer = buffer.slice(idx + 1)
+          if (!line) continue
+          if (!line.startsWith('data:')) continue
+          const data = line.slice(5).trim()
+          if (data === '[DONE]') {
+            doneOuter = true
+            controller.close()
+            return
+          }
+          try {
+            const j = JSON.parse(data)
+            const delta = j?.choices?.[0]?.delta?.content
+            if (typeof delta === 'string' && delta) {
+              controller.enqueue(enc.encode(delta))
+            } else if (Array.isArray(delta)) {
+              const txt = delta.map((p: any) => p?.text || p?.value || '').filter(Boolean).join('')
+              if (txt) controller.enqueue(enc.encode(txt))
+            }
+          } catch {
+            // Ignore JSON parse errors on keep-alives
+          }
+        }
+      },
+      cancel() {
+        try { reader.cancel() } catch {}
+      }
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+
 export async function POST(req: Request) {
   try {
     const { prompt, tickers = [], lang = 'da', sessionId, model }: ChatBody = await req.json()
@@ -329,6 +422,9 @@ export async function POST(req: Request) {
       }
     }
 
+    const url = new URL(req.url)
+    const wantsStream = url.searchParams.get('stream') === '1' || ((req.headers.get('accept') || '').includes('text/plain') || (req.headers.get('accept') || '').includes('text/event-stream'))
+
     let answer = ''
     let usedModel = ''
 
@@ -338,6 +434,11 @@ export async function POST(req: Request) {
       if (!headlines.length) {
         const msg = lang === 'da' ? 'Ingen nyheder fundet for valgte tickers.' : 'No news found for selected tickers.'
         answer = `${msg}\n\nTickers: ${safeTickers.join(', ')}`
+        if (wantsStream) {
+          const enc = new TextEncoder()
+          const stream = new ReadableStream<Uint8Array>({ start(controller){ controller.enqueue(enc.encode(answer)); controller.close() } })
+          return new Response(stream, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-model': 'finbert' } })
+        }
         usedModel = (env('HF_FINBERT_ID', false) as string) || 'ProsusAI/finbert'
       } else {
         const res = await classifyWithFinBert(headlines)
@@ -349,6 +450,11 @@ export async function POST(req: Request) {
           ...(res.details.slice(0, 8).map(d => `- [${d.label}] ${d.text}`)),
         ]
         answer = lines.join('\n')
+        if (wantsStream) {
+          const enc = new TextEncoder()
+          const stream = new ReadableStream<Uint8Array>({ start(controller){ controller.enqueue(enc.encode(answer)); controller.close() } })
+          return new Response(stream, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-model': 'finbert' } })
+        }
         usedModel = (env('HF_FINBERT_ID', false) as string) || 'ProsusAI/finbert'
       }
     } else if (model === 'gpt5') {
@@ -371,6 +477,13 @@ export async function POST(req: Request) {
         (lang === 'da' ? 'Spørgsmål:' : 'Question:'),
         prompt
       ].filter(Boolean).join('\n')
+      if (wantsStream) {
+        const stream = await streamOpenAIChat([
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ])
+        return new Response(stream, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-model': 'gpt-5-mini' } })
+      }
       answer = await callOpenAI([
         { role: 'system', content: system },
         { role: 'user', content: user },

@@ -707,18 +707,55 @@ def fetch_fundamentals(symbol: str) -> dict:
 
 
 
+    # Additional commonly available Yahoo fields
+    pe = num("trailingPE")
+    fwd_pe = num("forwardPE")
+    peg = num("pegRatio")
+    p_s = num("priceToSalesTrailing12Months")
+    p_b = num("priceToBook")
+    ev_to_ebitda = num("enterpriseToEbitda")
+    enterprise_value = num("enterpriseValue")
+    if ev_to_ebitda is None and enterprise_value is not None and ebitda and ebitda > 0:
+        try:
+            ev_to_ebitda = float(enterprise_value) / float(ebitda)
+        except Exception:
+            ev_to_ebitda = None
+    profit_margins = num("profitMargins")
+    operating_margins = num("operatingMargins")
+    roe = num("returnOnEquity")
+    roa = num("returnOnAssets")
+    dividend_yield = num("dividendYield")
+    payout_ratio = num("payoutRatio")
+    beta = num("beta")
+    eps_ttm = num("trailingEps")
+    forward_eps = num("forwardEps")
+    earnings_q_growth = num("earningsQuarterlyGrowth")
+    earnings_growth = num("earningsGrowth")
+
     return {
-
         "fcf_yield": fcf_yield,
-
         "nd_to_ebitda": nd_to_ebitda,
-
         "gross_margin": gross_margins,
-
         "revenue_growth": revenue_growth,
-
         "insider_own": insiders,
-
+        # Extended set
+        "pe": pe,
+        "fwd_pe": fwd_pe,
+        "peg": peg,
+        "p_s": p_s,
+        "p_b": p_b,
+        "ev_to_ebitda": ev_to_ebitda,
+        "profit_margin": profit_margins,
+        "operating_margin": operating_margins,
+        "roe": roe,
+        "roa": roa,
+        "dividend_yield": dividend_yield,
+        "payout_ratio": payout_ratio,
+        "beta": beta,
+        "eps_ttm": eps_ttm,
+        "forward_eps": forward_eps,
+        "earnings_q_growth": earnings_q_growth,
+        "earnings_growth": earnings_growth,
     }
 
 

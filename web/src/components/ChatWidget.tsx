@@ -62,12 +62,36 @@ export default function ChatWidget() {
     setPrompt('')
     setSending(true)
     try {
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: userMsg.content, tickers: selected, lang, model }) })
-      const j = await res.json()
-      if (!res.ok) throw new Error(j?.error || 'Server error')
-      const text = j.text || ''
-      setMessages(prev => [...prev, { id: Date.now() + 1, role: 'assistant', content: String(text) }])
-      setAnswer(text)
+      // Prepare placeholder assistant message for streaming
+      const assistantId = Date.now() + 1
+      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+
+      const res = await fetch('/api/chat?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/plain' },
+        body: JSON.stringify({ prompt: userMsg.content, tickers: selected, lang, model })
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({} as any))
+        throw new Error(j?.error || 'Server error')
+      }
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let full = ''
+      if (reader) {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          full += chunk
+          setMessages(prev => prev.map(m => (m.id === assistantId ? { ...m, content: (m.content + chunk) } : m)))
+        }
+      } else {
+        const text = await res.text()
+        full = text
+        setMessages(prev => prev.map(m => (m.id === assistantId ? { ...m, content: text } : m)))
+      }
+      setAnswer(full)
     } catch (e: any) {
       const err = e?.message || 'Fejl under forespørgslen'
       setMessages(prev => [...prev, { id: Date.now() + 2, role: 'assistant', content: `⚠️ ${err}` }])
