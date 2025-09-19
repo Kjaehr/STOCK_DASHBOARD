@@ -1,6 +1,10 @@
 "use client"
 
 import React from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import TextareaAutosize from 'react-textarea-autosize'
+import { Bot, MessageSquare, Send, X, Loader2 } from 'lucide-react'
 
 type Meta = { tickers?: string[] }
 
@@ -17,6 +21,7 @@ export default function ChatWidget() {
   const [model, setModel] = React.useState<ModelChoice>('gpt5')
   const [answer, setAnswer] = React.useState<string>('')
   const [sending, setSending] = React.useState(false)
+  const [messages, setMessages] = React.useState<{ id: number; role: 'user' | 'assistant'; content: string }[]>([])
 
   React.useEffect(() => {
     if (!open || meta) return
@@ -51,16 +56,22 @@ export default function ChatWidget() {
   }
 
   async function send() {
-    if (!prompt.trim()) return
+    if (!prompt.trim() || sending) return
+    const userMsg = { id: Date.now(), role: 'user' as const, content: prompt.trim() }
+    setMessages(prev => [...prev, userMsg])
+    setPrompt('')
     setSending(true)
-    setAnswer('')
     try {
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, tickers: selected, lang, model }) })
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: userMsg.content, tickers: selected, lang, model }) })
       const j = await res.json()
       if (!res.ok) throw new Error(j?.error || 'Server error')
-      setAnswer(j.text || '')
+      const text = j.text || ''
+      setMessages(prev => [...prev, { id: Date.now() + 1, role: 'assistant', content: String(text) }])
+      setAnswer(text)
     } catch (e: any) {
-      setAnswer(e?.message || 'Fejl under forespørgslen')
+      const err = e?.message || 'Fejl under forespørgslen'
+      setMessages(prev => [...prev, { id: Date.now() + 2, role: 'assistant', content: `⚠️ ${err}` }])
+      setAnswer(err)
     } finally {
       setSending(false)
     }
@@ -70,16 +81,17 @@ export default function ChatWidget() {
     <>
       <button
         onClick={() => setOpen(v => !v)}
-        className="fixed bottom-4 right-4 z-50 rounded-full bg-blue-600 text-white px-4 py-3 shadow-lg hover:bg-blue-500 focus:outline-none"
+        className="fixed bottom-4 right-4 z-50 h-12 w-12 rounded-full bg-gradient-to-br from-violet-600 to-cyan-500 text-white shadow-lg shadow-black/20 hover:brightness-110 focus:outline-none flex items-center justify-center"
         aria-label="Open chat"
+        title={open ? (lang === 'da' ? 'Luk chat' : 'Close chat') : 'AI Chat'}
       >
-        {open ? (lang === 'da' ? 'Luk chat' : 'Close chat') : 'AI Chat'}
+        {open ? <X className="h-5 w-5" /> : <MessageSquare className="h-5 w-5" />}
       </button>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-2 sm:p-4">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
-          <div className="relative w-full sm:max-w-xl bg-background text-foreground rounded-md shadow-xl border p-3 sm:p-4 max-h-[90vh] overflow-auto">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setOpen(false)} />
+          <div className="relative w-full sm:max-w-xl bg-background/80 backdrop-blur text-foreground rounded-2xl shadow-2xl border p-4 max-h-[90vh] overflow-auto">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-lg font-semibold">AI Chat</h2>
               <div className="flex items-center gap-2">
@@ -115,31 +127,50 @@ export default function ChatWidget() {
             </div>
 
             <div className="mt-3">
-              <textarea
+              <TextareaAutosize
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+                }}
+                minRows={2}
+                maxRows={8}
                 placeholder={model === 'finbert'
                   ? (lang === 'da' ? 'Spørg om nyhedssentiment, fx: "Hvordan er stemningen for AAPL?"' : 'Ask for news sentiment, e.g., "What is the sentiment for AAPL?"')
                   : (lang === 'da' ? 'Skriv dit spørgsmål om fundamental/teknisk analyse...' : 'Ask about fundamental/technical analysis...')}
-                className="w-full border rounded p-2 bg-background"
-                rows={4}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
 
             <div className="mt-3 flex items-center gap-2">
-              <button onClick={send} disabled={sending || !prompt.trim()} className="rounded bg-blue-600 text-white px-3 py-2 disabled:opacity-50">
-                {sending ? (lang === 'da' ? 'Sender...' : 'Sending...') : (lang === 'da' ? 'Send' : 'Send')}
+              <button onClick={send} disabled={sending || !prompt.trim()} className="inline-flex items-center gap-2 rounded-md bg-violet-600 text-white px-3 py-2 disabled:opacity-50 hover:bg-violet-500">
+                {sending ? (<><Loader2 className="h-4 w-4 animate-spin" />{lang === 'da' ? 'Sender...' : 'Sending...'}</>) : (<><Send className="h-4 w-4" />{lang === 'da' ? 'Send' : 'Send'}</>)}
               </button>
-              <button onClick={() => { setAnswer(''); setPrompt('') }} className="rounded border px-3 py-2">
+              <button onClick={() => { setMessages([]); setAnswer(''); setPrompt('') }} className="rounded-md border px-3 py-2 hover:bg-accent">
                 {lang === 'da' ? 'Ryd' : 'Clear'}
               </button>
             </div>
 
-            {answer && (
-              <div className="mt-3 border rounded p-2 whitespace-pre-wrap text-sm">
-                {answer}
-              </div>
-            )}
+            <div className="mt-3 space-y-3 max-h-56 overflow-auto pr-1">
+              {messages.map(m => (
+                <div key={m.id} className={`flex items-start gap-2 ${m.role === 'user' ? 'justify-end' : ''}`}>
+                  {m.role === 'assistant' && <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><Bot className="h-4 w-4" /></div>}
+                  <div className={`max-w-[80%] rounded-2xl border px-3 py-2 text-sm shadow-sm ${m.role === 'user' ? 'bg-primary text-primary-foreground rounded-tr-sm' : 'bg-card/60 backdrop-blur'}`}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} className="prose prose-invert prose-sm max-w-none">
+                      {m.content}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              ))}
+              {sending && (
+                <div className="flex items-start gap-2 opacity-80">
+                  <div className="mt-1 h-8 w-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-400 flex items-center justify-center text-white"><Bot className="h-4 w-4" /></div>
+                  <div className="rounded-2xl border bg-card/60 backdrop-blur px-3 py-2 text-sm">
+                    <div className="typing-dots"><span>.</span><span>.</span><span>.</span></div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
