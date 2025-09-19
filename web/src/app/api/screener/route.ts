@@ -48,7 +48,8 @@ export async function GET(req: Request) {
 
   async function fetchOne(t: string) {
     try {
-      const ch: any = await yahooFinance.chart(t, { range: '2y', interval: '1d' })
+      const period1 = new Date(Date.now() - 1000 * 60 * 60 * 24 * 365 * 2)
+      const ch: any = await yahooFinance.chart(t, { period1, interval: '1d' } as any)
       let hist: any[] = Array.isArray(ch?.quotes) && ch.quotes.length ? ch.quotes : []
       if (!hist.length) {
         const ts: number[] = ch?.timestamp || []
