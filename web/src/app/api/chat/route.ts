@@ -107,6 +107,29 @@ async function callHF(inputs: string, modelId: string, signal?: AbortSignal) {
   return extractTextFromHF(json)
 }
 
+// Small helpers
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error('timeout')), ms)
+    p.then(v => { clearTimeout(to); resolve(v) })
+     .catch(e => { clearTimeout(to); reject(e) })
+  })
+}
+
+async function fetchRssWithTimeout(url: string, ms = 4000): Promise<string | null> {
+  const ac = new AbortController()
+  const to = setTimeout(() => ac.abort('timeout'), ms)
+  try {
+    const r = await fetch(url, { signal: ac.signal })
+    if (!r.ok) return null
+    return await r.text()
+  } catch {
+    return null
+  } finally {
+    clearTimeout(to)
+  }
+}
+
 // --- News fetching & FinBERT sentiment ---
 function googleNewsUrl(query: string, lang: 'da'|'en') {
   const base = 'https://news.google.com/rss/search'
@@ -154,9 +177,8 @@ async function fetchNewsHeadlines(tickers: string[], lang: 'da'|'en', perTicker 
     for (const q of terms) {
       if (collected >= perTicker) break
       const url = googleNewsUrl(q, lang)
-      try {
-        const r = await fetch(url)
-        const xml = await r.text()
+      const xml = await fetchRssWithTimeout(url, 4000)
+      if (xml) {
         const items = parseRssItems(xml)
         for (const it of items) {
           if (it.title && headlines.length < 100) {
@@ -166,7 +188,7 @@ async function fetchNewsHeadlines(tickers: string[], lang: 'da'|'en', perTicker 
             if (collected >= perTicker) break
           }
         }
-      } catch {}
+      }
     }
   }
   // de-dup across all
@@ -273,9 +295,9 @@ export async function POST(req: Request) {
       // Analysis via GPT-5 mini, include FinBERT sentiment summary if possible
       let sentimentLine = ''
       try {
-        const headlines = await fetchNewsHeadlines(safeTickers, lang)
+        const headlines = await withTimeout(fetchNewsHeadlines(safeTickers, lang, 6), 5000)
         if (headlines.length) {
-          const res = await classifyWithFinBert(headlines)
+          const res = await withTimeout(classifyWithFinBert(headlines), 5000)
           sentimentLine = `FinBERT sentiment: POS=${res.counts.POSITIVE} | NEU=${res.counts.NEUTRAL} | NEG=${res.counts.NEGATIVE}`
         }
       } catch {}
