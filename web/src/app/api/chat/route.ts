@@ -233,11 +233,25 @@ function messagesToText(messages: {role:string, content:string}[]) {
 }
 
 function extractOpenAIText(j: any): string {
-  // Responses API
+  // Responses API common shapes
   if (typeof j?.output_text === 'string' && j.output_text.trim()) return j.output_text
   if (Array.isArray(j?.content)) {
     const parts = j.content.map((p: any) => p?.text?.value || p?.text || '').filter(Boolean)
     if (parts.length) return parts.join('\n')
+  }
+  if (Array.isArray(j?.output)) {
+    const texts: string[] = []
+    for (const item of j.output) {
+      if (item?.type === 'message' && Array.isArray(item?.content)) {
+        for (const c of item.content) {
+          if (typeof c?.text?.value === 'string') texts.push(c.text.value)
+          else if (typeof c?.text === 'string') texts.push(c.text)
+        }
+      } else if (item?.type === 'output_text' && typeof item?.text === 'string') {
+        texts.push(item.text)
+      }
+    }
+    if (texts.length) return texts.join('\n')
   }
   // Chat Completions API
   const cc = j?.choices?.[0]?.message?.content
