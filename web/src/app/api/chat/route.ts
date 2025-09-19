@@ -228,20 +228,66 @@ async function classifyWithFinBert(texts: string[]) {
 }
 
 // --- OpenAI GPT-5 mini ---
+function messagesToText(messages: {role:string, content:string}[]) {
+  return messages.map(m => (m.role === 'system' ? `[system]\n${m.content}` : `[user]\n${m.content}`)).join('\n\n')
+}
+
+function extractOpenAIText(j: any): string {
+  // Responses API
+  if (typeof j?.output_text === 'string' && j.output_text.trim()) return j.output_text
+  if (Array.isArray(j?.content)) {
+    const parts = j.content.map((p: any) => p?.text?.value || p?.text || '').filter(Boolean)
+    if (parts.length) return parts.join('\n')
+  }
+  // Chat Completions API
+  const cc = j?.choices?.[0]?.message?.content
+  if (typeof cc === 'string' && cc.trim()) return cc
+  if (Array.isArray(cc)) {
+    const parts = cc.map((p: any) => p?.text || p?.value || '').filter(Boolean)
+    if (parts.length) return parts.join('\n')
+  }
+  try { return JSON.stringify(j) } catch { return '' }
+}
+
 async function callOpenAI(messages: any[]) {
   const key = env('OPENAI_API_KEY') as string
   const ac = new AbortController()
   const timeout = setTimeout(() => ac.abort('timeout'), 30000)
+  const input = messagesToText(messages)
   try {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    // Prefer Responses API for gpt-5 models
+    let r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-5-mini', messages, max_completion_tokens: 800 }),
+      body: JSON.stringify({ model: 'gpt-5-mini', input, max_output_tokens: 800 }),
       signal: ac.signal,
     })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      const msg = err?.error?.message || `OpenAI error ${r.status}`
+      // Retry with alternative param name if hinted
+      if (/max_completion_tokens/i.test(String(msg))) {
+        r = await fetch('https://api.openai.com/v1/responses', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-5-mini', input, max_completion_tokens: 800 }),
+          signal: ac.signal,
+        })
+      } else if (/unknown_endpoint|use responses/i.test(String(msg))) {
+        // Fallback to chat completions if responses not supported in env
+        r = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'gpt-5-mini', messages }),
+          signal: ac.signal,
+        })
+      }
+    }
     const j = await r.json()
     if (!r.ok) throw new Error(j?.error?.message || `OpenAI error ${r.status}`)
-    return j?.choices?.[0]?.message?.content || ''
+    const text = extractOpenAIText(j)
+    if (!text || !String(text).trim()) return '(Tomt svar fra GPT‑5 mini)'
+    return text
   } catch (e: any) {
     if (e?.name === 'AbortError') throw new Error('OpenAI timeout (30s)')
     throw e
