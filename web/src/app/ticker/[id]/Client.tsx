@@ -187,10 +187,19 @@ export default function TickerClient({ id }: { id: string }) {
     try {
       setLoading(true)
       setError(null)
-      const json = await fetch(`${DATA_BASE}/${id.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() })
-      setData(json)
-      setUsingCache(false)
-      writeCache(key, json)
+      if (opts?.force) {
+        const resp = await fetch(`/api/screener?tickers=${encodeURIComponent(id)}&refresh=1`, { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error(`screener ${r.status}`); return r.json() })
+        const item = (resp?.items || [])[0]
+        if (!item) throw new Error('no live data')
+        setData(item)
+        setUsingCache(false)
+        writeCache(key, item)
+      } else {
+        const json = await fetch(`${DATA_BASE}/${id.replace(/\s+/g,'_')}.json`).then(r => { if (!r.ok) throw new Error(`data ${r.status}`); return r.json() })
+        setData(json)
+        setUsingCache(false)
+        writeCache(key, json)
+      }
     } catch (e) {
       console.error('Failed to load ticker', e)
       setError('Kunne ikke hente den seneste data for denne ticker.')

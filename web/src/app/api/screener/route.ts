@@ -78,12 +78,45 @@ export async function GET(req: Request) {
       const trendUp = (sma50[last] != null && sma200[last] != null && price != null) ? ((sma50[last]! > sma200[last]!) && (price > sma200[last]!)) : false
 
       // Fundamentals (best-effort) – be tolerant to API/type shape
-      const sum = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'financialData', 'price'] }).catch(() => null)
+      const sum = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'financialData', 'price', 'majorHoldersBreakdown', 'summaryDetail'] as any }).catch(() => null)
       const qs: any = sum as any
       const mcap = safeNum(qs?.price?.marketCap?.raw ?? qs?.price?.marketCap)
       const fcf = safeNum(qs?.financialData?.freeCashflow?.raw ?? qs?.financialData?.freeCashflow ?? qs?.defaultKeyStatistics?.freeCashflow?.raw ?? qs?.defaultKeyStatistics?.freeCashflow)
       const ebitda = safeNum(qs?.financialData?.ebitda?.raw ?? qs?.financialData?.ebitda)
+      const totalDebt = safeNum(qs?.financialData?.totalDebt?.raw ?? qs?.financialData?.totalDebt ?? qs?.defaultKeyStatistics?.totalDebt?.raw ?? qs?.defaultKeyStatistics?.totalDebt)
+      const totalCash = safeNum(qs?.financialData?.totalCash?.raw ?? qs?.financialData?.totalCash)
+      const netDebt = (totalDebt != null && totalCash != null) ? (totalDebt - totalCash) : (totalDebt != null ? totalDebt : null)
+      const ndToEbitda = (netDebt != null && ebitda != null && ebitda !== 0) ? (netDebt / ebitda) : null
+      const grossMargin = safeNum(qs?.financialData?.grossMargins?.raw ?? qs?.financialData?.grossMargins ?? qs?.summaryDetail?.grossMargins?.raw ?? qs?.summaryDetail?.grossMargins)
+      const revenueGrowth = safeNum(qs?.financialData?.revenueGrowth?.raw ?? qs?.financialData?.revenueGrowth)
+      const insiderOwn = safeNum(qs?.defaultKeyStatistics?.heldPercentInsiders?.raw ?? qs?.defaultKeyStatistics?.heldPercentInsiders ?? qs?.majorHoldersBreakdown?.insidersPercentHeld?.raw ?? qs?.majorHoldersBreakdown?.insidersPercentHeld)
       const fcfYield = (fcf != null && mcap != null && mcap > 0) ? (fcf / mcap) : null
+
+      function scoreFundamentals() {
+        let pts = 0
+        // FCF Yield (max 12)
+        if (fcfYield != null) {
+          if (fcfYield > 0.08) pts += 12; else if (fcfYield >= 0.04) pts += 8; else if (fcfYield >= 0) pts += 4
+        }
+        // NetDebt/EBITDA (max 8)
+        if (ndToEbitda != null) {
+          if (ndToEbitda < 1) pts += 8; else if (ndToEbitda < 2) pts += 5; else if (ndToEbitda < 3) pts += 2
+        }
+        // Gross margin (max 8)
+        if (grossMargin != null) {
+          if (grossMargin > 0.45) pts += 8; else if (grossMargin >= 0.30) pts += 4
+        }
+        // Revenue growth (max 6)
+        if (revenueGrowth != null) {
+          if (revenueGrowth > 0.15) pts += 6; else if (revenueGrowth >= 0.05) pts += 3; else if (revenueGrowth >= 0) pts += 1
+        }
+        // Insider own (max 6)
+        if (insiderOwn != null) {
+          if (insiderOwn >= 0.10) pts += 6; else if (insiderOwn >= 0.03) pts += 3
+        }
+        return pts
+      }
+      const fundPoints = scoreFundamentals()
 
       // News + VADER
       const rss = await parser.parseURL(`https://news.google.com/rss/search?q=${encodeURIComponent(t + ' stock')}&hl=en-US&gl=US&ceid=US:en`).catch(() => ({ items: [] as any[] }))
@@ -96,19 +129,29 @@ export async function GET(req: Request) {
 
       // Simple scoring aligned with weights 0.40/0.35/0.25
       const techPoints = (trendUp ? 20 : 0) + ((rsi[last] != null && rsi[last]! >= 45 && rsi[last]! <= 65) ? 10 : 0) + ((atrPct != null && atrPct < 5) ? 5 : 0)
-      const fundPoints = ((fcfYield != null && fcfYield > 0.03) ? 20 : 0) + ((ebitda != null) ? 5 : 0) + ((mcap != null && mcap < 3e8) ? 5 : 0)
       const sentPoints = (mean7 > 0.1 ? 10 : (mean7 < -0.1 ? 0 : 5)) + ((last7.length > 5) ? 5 : 0)
       const score = Math.round(0.40 * fundPoints + 0.35 * techPoints + 0.25 * sentPoints)
+
+      const fundamentals = {
+        fcf_yield: fcfYield,
+        nd_to_ebitda: ndToEbitda,
+        gross_margin: grossMargin,
+        revenue_growth: revenueGrowth,
+        insider_own: insiderOwn,
+      }
 
       return {
         ticker: t,
         price,
+        sma50: sma50[last],
+        sma200: sma200[last],
         updated_at: dates[last] || new Date().toISOString().slice(0, 10),
         score,
         fund_points: fundPoints,
         tech_points: techPoints,
         sent_points: sentPoints,
         flags: [],
+        fundamentals,
         technicals: { provider: 'yahoo', rsi: rsi[last], atr_pct: atrPct, sma50: sma50[last], sma200: sma200[last] },
         sentiment: { mean7, count7: last7.length },
       }
