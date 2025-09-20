@@ -3,10 +3,34 @@ name: Train and Upload ML Model
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Training mode: yf (yfinance) or snapshot"
+        required: false
+        default: "yf"
       version:
         description: "Model version prefix (e.g. v1)"
         required: false
         default: "v1"
+      years:
+        description: "[yf] Lookback years"
+        required: false
+        default: "3"
+      horizon:
+        description: "[yf] Horizon trading days"
+        required: false
+        default: "20"
+      up:
+        description: "[yf] UP threshold (fraction, e.g. 0.05)"
+        required: false
+        default: "0.05"
+      down:
+        description: "[yf] DOWN threshold (fraction, e.g. 0.05)"
+        required: false
+        default: "0.05"
+      max_tickers:
+        description: "[yf] Max tickers to train on (to keep CI fast)"
+        required: false
+        default: "30"
 
 jobs:
   train-upload:
@@ -36,7 +60,19 @@ jobs:
 
       - name: Train model
         run: |
-          python scripts/ml/train_model.py --out-dir ml_out --version "${{ github.event.inputs.version || 'v1' }}"
+          MODE="${{ github.event.inputs.mode || 'yf' }}"
+          if [ "$MODE" = "yf" ]; then
+            python scripts/ml/train_model_yf.py \
+              --out-dir ml_out \
+              --version "${{ github.event.inputs.version || 'v1' }}" \
+              --years "${{ github.event.inputs.years || '3' }}" \
+              --horizon "${{ github.event.inputs.horizon || '20' }}" \
+              --up "${{ github.event.inputs.up || '0.05' }}" \
+              --down "${{ github.event.inputs.down || '0.05' }}" \
+              --max-tickers "${{ github.event.inputs.max_tickers || '30' }}"
+          else
+            python scripts/ml/train_model.py --out-dir ml_out --version "${{ github.event.inputs.version || 'v1' }}"
+          fi
 
       - name: List outputs
         run: |

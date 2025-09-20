@@ -162,11 +162,20 @@ def train_and_dump(out_dir: Path, version_prefix: str = 'v1') -> Tuple[Path, Pat
     X, y, used = load_dataset()
     Xs, mean_map, std_map = standardize(X)
 
-    clf = LogisticRegression(max_iter=200, solver='liblinear')
-    clf.fit(Xs, y)
-
-    coef = clf.coef_.reshape(-1).tolist()
-    intercept = float(clf.intercept_.reshape(-1)[0])
+    # Train classifier; if dataset collapses to a single class, fall back to a prior-only model
+    uniq = np.unique(y)
+    if uniq.size < 2:
+        # Prior probability with smoothing; avoid logit(0) or logit(1)
+        eps = 0.01
+        p = float(np.clip(y.mean() if y.size > 0 else 0.5, eps, 1 - eps))
+        intercept = float(np.log(p / (1 - p)))
+        coef = [0.0 for _ in FEATURE_ORDER]
+        print(f"[train_model] Single-class dataset detected (class={int(uniq[0]) if uniq.size==1 else 'N/A'}). Using prior-only model with p={p:.3f}")
+    else:
+        clf = LogisticRegression(max_iter=200, solver='liblinear')
+        clf.fit(Xs, y)
+        coef = clf.coef_.reshape(-1).tolist()
+        intercept = float(clf.intercept_.reshape(-1)[0])
 
     ts = datetime.utcnow().strftime('%Y%m%d%H%M')
     version = f"{version_prefix}_{ts}"
