@@ -231,7 +231,7 @@ def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5
                 auto_adjust=True,
                 progress=False,
                 session=SESSION,
-                group_by=None,
+                group_by='column',
                 threads=False,
             )
             if isinstance(df, pd.DataFrame) and not df.empty:
