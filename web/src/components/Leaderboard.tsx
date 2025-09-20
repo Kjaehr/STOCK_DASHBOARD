@@ -458,6 +458,10 @@ export default function Leaderboard() {
                 <button onClick={()=>toggleSort('tech')} className="inline-flex items-center gap-1" title="Sort by technicals">Tech <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
+              <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('ml')} className="inline-flex items-center gap-1" title="Sort by ML probability">ML <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+
                 <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1" title="Sort by sentiment">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
 
@@ -475,6 +479,8 @@ export default function Leaderboard() {
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-12 bg-muted rounded" /></TableCell>
+
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell><div className="h-4 w-40 bg-muted rounded" /></TableCell>
@@ -511,6 +517,31 @@ export default function Leaderboard() {
                     {(row as any)?.technicals?.atr_pct != null ? `${fmt((row as any)?.technicals?.atr_pct)}%` : '--'}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{row.fund_points ?? 0}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {(() => {
+                      const rec = ml[row.ticker]
+                      const p = rec?.p
+                      const pct = (p == null || Number.isNaN(p)) ? '--' : `${Math.round(p*100)}%`
+                      const contribs = rec?.contribs || []
+                      const tips = contribs.length ? contribs.slice(0,3).map(c=>`${c.key}: ${c.contrib>=0?'+':''}${c.contrib.toFixed(2)}`).join(', ') : ''
+                      return (
+                        <Tooltip.Root>
+                          <Tooltip.Trigger asChild>
+                            <span title={tips || undefined}>{pct}</span>
+                          </Tooltip.Trigger>
+                          {tips ? (
+                            <Tooltip.Portal>
+                              <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md max-w-[280px]">
+                                Linear model drivers: {tips}
+                                <Tooltip.Arrow className="fill-border" />
+                              </Tooltip.Content>
+                            </Tooltip.Portal>
+                          ) : null}
+                        </Tooltip.Root>
+                      )
+                    })()}
+                  </TableCell>
+
                   <TableCell className="text-right tabular-nums">{row.tech_points ?? 0}</TableCell>
                   <TableCell className="text-right tabular-nums">{row.sent_points ?? 0}</TableCell>
                   <TableCell className="max-w-[220px] truncate">
