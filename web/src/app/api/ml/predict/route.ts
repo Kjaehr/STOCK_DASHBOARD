@@ -35,12 +35,17 @@ export async function GET(req: Request) {
     if (!tickers.length) return json({ error: 'tickers required' }, 400)
 
     const modelPath = (url.searchParams.get('model') || DEFAULT_MODEL_POINTER).trim()
+    const debug = url.searchParams.get('debug') === '1'
 
     // 1) Load model (cached in-memory across warm invocations)
     let model
+    let modelError = null
     try {
       model = await loadLinearModelFromStorage(modelPath)
     } catch (e: any) {
+      // Log the actual error for debugging
+      modelError = e?.message || String(e)
+      console.error('ML model load failed:', modelError)
       // Fallback: no model available -> degrade to heuristic based on screener score
       model = null
     }
@@ -67,7 +72,14 @@ export async function GET(req: Request) {
       return { ticker: t, p, contribs }
     })
 
-    return json({ generated_at: new Date().toISOString(), model: model ? { version: model.version, path: modelPath } : { version: 'heuristic' }, count: preds.length, preds })
+    const response = {
+      generated_at: new Date().toISOString(),
+      model: model ? { version: model.version, path: modelPath } : { version: 'heuristic' },
+      count: preds.length,
+      preds,
+      ...(debug && modelError ? { debug: { modelError, modelPath } } : {})
+    }
+    return json(response)
   } catch (e: any) {
     return json({ error: e?.message || String(e) }, 500)
   }
