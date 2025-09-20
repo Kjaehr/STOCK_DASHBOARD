@@ -455,13 +455,12 @@ export default function Leaderboard() {
                 <button onClick={()=>toggleSort('fund')} className="inline-flex items-center gap-1" title="Sort by fundamentals">Fund <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
+                <button onClick={()=>toggleSort('ml')} className="inline-flex items-center gap-1" title="Sort by ML probability">ML <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
+              </TableHead>
+              <TableHead className="text-right whitespace-nowrap">
                 <button onClick={()=>toggleSort('tech')} className="inline-flex items-center gap-1" title="Sort by technicals">Tech <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
               <TableHead className="text-right whitespace-nowrap">
-              <TableHead className="text-right whitespace-nowrap">
-                <button onClick={()=>toggleSort('ml')} className="inline-flex items-center gap-1" title="Sort by ML probability">ML <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
-              </TableHead>
-
                 <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1" title="Sort by sentiment">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
 
