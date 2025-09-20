@@ -1,4 +1,6 @@
 import crypto from 'crypto'
+import { ParquetSchema, ParquetWriter } from 'parquetjs-lite'
+import { Writable } from 'stream'
 
 export const runtime = 'nodejs'
 
@@ -101,6 +103,24 @@ async function getStorageObject(path: string) {
   return r
 }
 
+async function putStorageBinary(path: string, data: ArrayBuffer, upsert = true, contentType = 'application/octet-stream') {
+  const SUPABASE_URL = env('SUPABASE_URL')!
+  const SUPABASE_BUCKET = env('SUPABASE_BUCKET')!
+  const SERVICE = (env('SUPABASE_SERVICE_ROLE', false) || env('SUPABASE_KEY', false)) as string
+  const url = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/${encodeURIComponent(SUPABASE_BUCKET)}/${path.replace(/^\/+/, '')}`
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SERVICE}`,
+      apikey: SERVICE,
+      ...(upsert ? { 'x-upsert': 'true' } : {}),
+      'Content-Type': contentType,
+    },
+    body: data,
+  })
+  return r
+}
+
 function sha256Hex(buf: Uint8Array | string) {
   const h = crypto.createHash('sha256')
   if (typeof buf === 'string') h.update(buf)
@@ -158,12 +178,78 @@ export async function GET(req: Request) {
       manifestFiles.push({ path: key, size: out.length, checksum })
     }
 
-    // 4) Parquet per run (partitioned path) — requires dependency; skip if not enabled
-    const parquetEnabled = process.env.PARQUET_ENABLED === '1'
-    if (!parquetEnabled) {
-      // noop; we will still write manifest
-    } else {
-      // Placeholder: Implement when dependency approved
+    // 4) Parquet per run (partitioned path)
+    const parquetEnabled = (process.env.PARQUET_ENABLED ?? '1') === '1'
+    if (parquetEnabled) {
+      const pqBase = 'stocks-datalake/parquet'
+      const d = new Date(nowIso)
+      const yyyy = d.getUTCFullYear()
+      const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
+      const dd = String(d.getUTCDate()).padStart(2, '0')
+
+      const schema = new ParquetSchema({
+        timestamp_iso: { type: 'UTF8' },
+        ticker: { type: 'UTF8' },
+        price: { type: 'DOUBLE', optional: true },
+        score: { type: 'INT64', optional: true },
+        rsi: { type: 'DOUBLE', optional: true },
+        atr_pct: { type: 'DOUBLE', optional: true },
+        sma20: { type: 'DOUBLE', optional: true },
+        sma50: { type: 'DOUBLE', optional: true },
+        sma200: { type: 'DOUBLE', optional: true },
+        sector: { type: 'UTF8', optional: true },
+        industry: { type: 'UTF8', optional: true },
+        sent_mean7: { type: 'DOUBLE', optional: true },
+        sent_count7: { type: 'INT64', optional: true },
+        flags: { type: 'UTF8', optional: true },
+        in_buy_zone: { type: 'BOOLEAN', optional: true },
+        dist_to_stop_pct: { type: 'DOUBLE', optional: true },
+        dist_to_t1_pct: { type: 'DOUBLE', optional: true },
+      } as any)
+
+      for (const x of items) {
+        const t = normalizeTicker(x.ticker)
+        const pqKey = `${pqBase}/ticker=${t}/year=${yyyy}/month=${mm}/day=${dd}/snapshot.parquet`
+
+        class CollectWritable extends Writable {
+          chunks: Buffer[] = []
+          _write(chunk: any, _enc: any, cb: any) {
+            this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+            cb()
+          }
+        }
+        const sink = new CollectWritable()
+        const writer = await ParquetWriter.openStream(schema as any, sink as any)
+        await writer.appendRow({
+          timestamp_iso: nowIso,
+          ticker: x.ticker,
+          price: x.price ?? null,
+          score: x.score ?? null,
+          rsi: x?.technicals?.rsi ?? null,
+          atr_pct: x?.technicals?.atr_pct ?? null,
+          sma20: x?.technicals?.sma20 ?? null,
+          sma50: x?.technicals?.sma50 ?? null,
+          sma200: x?.technicals?.sma200 ?? null,
+          sector: x?.fundamentals?.sector ?? null,
+          industry: x?.fundamentals?.industry ?? null,
+          sent_mean7: x?.sentiment?.mean7 ?? null,
+          sent_count7: x?.sentiment?.count7 ?? null,
+          flags: Array.isArray(x?.flags) ? x.flags.join('|') : null,
+          in_buy_zone: x?.position_health?.in_buy_zone ?? null,
+          dist_to_stop_pct: x?.position_health?.dist_to_stop_pct ?? null,
+          dist_to_t1_pct: x?.position_health?.dist_to_t1_pct ?? null,
+        })
+        await writer.close()
+
+        const buf = Buffer.concat(sink.chunks)
+        const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+        const put = await putStorageBinary(pqKey, ab, true, 'application/octet-stream')
+        if (!put.ok) {
+          const txt = await put.text().catch(()=>'')
+          console.error('Parquet upload failed', pqKey, put.status, txt)
+        }
+        manifestFiles.push({ path: pqKey, size: buf.length, checksum: sha256Hex(buf) })
+      }
     }
 
     // 5) Write manifest latest.json
