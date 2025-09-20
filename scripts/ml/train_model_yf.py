@@ -24,6 +24,7 @@ import math
 import json
 import random
 import time
+from io import StringIO
 
 import numpy as np
 import pandas as pd
@@ -129,11 +130,20 @@ def label_future_path(df: pd.DataFrame, horizon: int, up: float, down: float) ->
 
 
 def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5) -> pd.DataFrame | None:
-    """Robust fetch using yfinance with retries and a shared session."""
+    """Robust fetch using yfinance with retries and a shared session. Falls back to Stooq CSV if Yahoo fails."""
     # Prefer download() which hits batch endpoints reliably; but we call per ticker to keep memory low
     for a in range(attempts):
         try:
-            df = yf.download(ticker, period=f"{years}y", interval='1d', auto_adjust=True, progress=False, session=SESSION, group_by=None, threads=False)
+            df = yf.download(
+                ticker,
+                period=f"{years}y",
+                interval='1d',
+                auto_adjust=True,
+                progress=False,
+                session=SESSION,
+                group_by=None,
+                threads=False,
+            )
             if isinstance(df, pd.DataFrame) and not df.empty:
                 cols = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
                 if len(cols) >= 4:  # must have O/H/L/C (Volume optional)
@@ -141,8 +151,60 @@ def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5
                     if not out.empty:
                         return out
         except Exception:
+            # yfinance sometimes returns HTML/JSONDecodeError; retry with backoff
             pass
         time.sleep(pause * (a + 1))
+
+    # Fallback: try Stooq daily CSV
+    try:
+        df_s = fetch_history_stooq(ticker, years)
+        if df_s is not None and not df_s.empty:
+            return df_s
+    except Exception:
+        pass
+    return None
+
+
+
+def fetch_history_stooq(ticker: str, years: int) -> pd.DataFrame | None:
+    """Fetch OHLC from Stooq CSV as a lightweight fallback (no extra deps).
+    Stooq US symbols are typically ticker.us (lowercase). Returns last N years.
+    """
+    s = ticker.lower()
+    candidates = []
+    if not s.endswith('.us'):
+        candidates.append(f"{s}.us")
+    candidates.append(s)
+
+    for sym in candidates:
+        url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
+        try:
+            r = SESSION.get(url, timeout=10)
+            txt = r.text if r and r.status_code == 200 else ''
+            if not txt or txt.lstrip().startswith('<'):  # HTML error page
+                continue
+            df = pd.read_csv(StringIO(txt))
+            if df is None or df.empty:
+                continue
+            if 'Date' not in df.columns or 'Close' not in df.columns:
+                continue
+            keep_cols = [c for c in ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+            df = df[keep_cols].dropna()
+            if df.empty:
+                continue
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df = df.dropna(subset=['Date']).set_index('Date').sort_index()
+            cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.DateOffset(years=years)
+            df = df[df.index >= cutoff]
+            # ensure numeric types
+            for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
+            df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+            if not df.empty:
+                return df
+        except Exception:
+            continue
     return None
 
 
