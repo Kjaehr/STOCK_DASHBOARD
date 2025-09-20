@@ -17,16 +17,19 @@ Example:
 """
 from __future__ import annotations
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 import math
 import json
+import random
+import time
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from sklearn.linear_model import LogisticRegression
+import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / 'data'
@@ -43,6 +46,16 @@ FEATURE_ORDER = [
     'atr_bucket_3',
     'atr_bucket_4',
 ]
+
+
+# Shared requests session with a browser-like User-Agent for Yahoo endpoints
+SESSION = requests.Session()
+SESSION.headers.update({
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Connection': 'keep-alive',
+})
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -115,24 +128,32 @@ def label_future_path(df: pd.DataFrame, horizon: int, up: float, down: float) ->
     return pd.Series(y, index=df.index)
 
 
-def fetch_history(ticker: str, years: int) -> pd.DataFrame | None:
-    try:
-        end = datetime.utcnow().date()
-        start = end - timedelta(days=int(years * 365.25))
-        df = yf.Ticker(ticker).history(interval='1d', start=start, end=end, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        df = df[['Open','High','Low','Close','Volume']].dropna()
-        return df
-    except Exception:
-        return None
+def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5) -> pd.DataFrame | None:
+    """Robust fetch using yfinance with retries and a shared session."""
+    # Prefer download() which hits batch endpoints reliably; but we call per ticker to keep memory low
+    for a in range(attempts):
+        try:
+            df = yf.download(ticker, period=f"{years}y", interval='1d', auto_adjust=True, progress=False, session=SESSION, group_by=None, threads=False)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                cols = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
+                if len(cols) >= 4:  # must have O/H/L/C (Volume optional)
+                    out = df[cols].dropna()
+                    if not out.empty:
+                        return out
+        except Exception:
+            pass
+        time.sleep(pause * (a + 1))
+    return None
 
 
 def build_dataset(tickers: List[str], years: int, horizon: int, up: float, down: float, max_tickers: int) -> Tuple[np.ndarray, np.ndarray]:
     X_rows: List[List[float]] = []
     Y_rows: List[int] = []
     used = 0
-    for t in tickers:
+    random.seed(42)
+    tickers_shuffled = tickers[:]
+    random.shuffle(tickers_shuffled)
+    for t in tickers_shuffled:
         if used >= max_tickers:
             break
         df = fetch_history(t, years)
