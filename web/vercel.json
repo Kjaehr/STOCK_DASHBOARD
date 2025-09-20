@@ -1,0 +1,9 @@
+{
+  "crons": [
+    { "path": "/api/cron/ingest?group=0&groups=3", "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/ingest?group=1&groups=3", "schedule": "2-59/15 * * * *" },
+    { "path": "/api/cron/ingest?group=2&groups=3", "schedule": "4-59/15 * * * *" },
+    { "path": "/api/cron/warm?n=10", "schedule": "1-59/15 * * * *" }
+  ]
+}
+
