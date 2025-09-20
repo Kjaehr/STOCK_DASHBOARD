@@ -86,6 +86,15 @@ Mål: Stabil 15‑min opdatering uden rebuilds.
   - Data opdateres indenfor 15–20 min. SLA
   - Ingen timeouts; log rate-limit hændelser
 
+
+> Note (Vercel Hobby limitation): Cron Jobs kører kun 1 gang pr. dag på Hobby-planen. Verden er midlertidigt sat til daglige kørsler i `web/vercel.json` (kl. 06:00–06:20 UTC i forskudte trin). Når du opgraderer til Pro, ændres udtrykkene tilbage til hvert 15. minut:
+>
+> - Ingest gruppe 0/1/2: `*/15 * * * *`, `2-59/15 * * * *`, `4-59/15 * * * *`
+> - Warm: `1-59/15 * * * *`
+> - Alerts: `6-59/15 * * * *`
+>
+> Alternativt kan alle sættes til `*/15 * * * *` og spredes i kode.
+
 ## Fase 6 – Alerts/Notifikationer (2–4 dage)
 Mål: WebPush/Email ved køb/stop/target events.
 - Backend
