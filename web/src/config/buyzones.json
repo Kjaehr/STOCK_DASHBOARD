@@ -1,0 +1,8 @@
+{
+  "sma20": { "enabled": true, "k_atr": 1.0 },
+  "sma50": { "enabled": true, "k_atr": 1.0 },
+  "breakout": { "enabled": true, "lookback": 60, "k_atr": 0.5 },
+  "stops": { "ma": "sma50", "atr_mult": 1.0 },
+  "targets": { "multiples": [1.5, 2.5] }
+}
+

@@ -4,6 +4,8 @@ import Parser from 'rss-parser'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { SentimentIntensityAnalyzer: VADER } = require('vader-sentiment')
 import { sma, rsi14, atr14 } from '../../../lib/indicators'
+import buyCfg from '../../../config/buyzones.json'
+
 
 export const runtime = 'nodejs'
 export const revalidate = 900 // 15 min route cache window (advisory)
@@ -198,6 +200,85 @@ export async function GET(req: Request) {
       const allNull = [fcfYield, ndToEbitda, grossMargin, revenueGrowth, insiderOwn].every(v => v == null)
       if (allNull) flags.push('fundamentals_missing')
 
+      // Phase 2 – compute buy zones, exit levels, and position health
+      const lastAtr = (atr[last] != null ? atr[last]! : null)
+      const ma20v = sma20[last]
+      const ma50v = sma50[last]
+      const ma200v = sma200[last]
+      const cfg: any = (buyCfg as any) || {}
+
+      const buy_zones: Array<{ type: string; ma?: string; price_low: number; price_high: number; confidence?: number; rationale?: string }> = []
+      // SMA20 pullback zone: [MA20 - k*ATR, MA20]
+      if (cfg?.sma20?.enabled && typeof ma20v === 'number' && typeof lastAtr === 'number') {
+        const k = Number(cfg.sma20.k_atr ?? 1)
+        const lo = ma20v - k * lastAtr
+        const hi = ma20v
+        if (Number.isFinite(lo) && Number.isFinite(hi)) {
+          buy_zones.push({ type: 'sma_pullback', ma: 'SMA20', price_low: lo, price_high: hi, confidence: 0.6, rationale: `Zone = SMA20 − ${k}·ATR → SMA20` })
+        }
+      }
+      // SMA50 pullback zone: [MA50 - k*ATR, MA50]
+      if (cfg?.sma50?.enabled && typeof ma50v === 'number' && typeof lastAtr === 'number') {
+        const k = Number(cfg.sma50.k_atr ?? 1)
+        const lo = ma50v - k * lastAtr
+        const hi = ma50v
+        if (Number.isFinite(lo) && Number.isFinite(hi)) {
+          buy_zones.push({ type: 'sma_pullback', ma: 'SMA50', price_low: lo, price_high: hi, confidence: 0.6, rationale: `Zone = SMA50 − ${k}·ATR → SMA50` })
+        }
+      }
+      // Breakout retest zone around recent high
+      {
+        const lb = Math.max(20, Math.min(120, Number(cfg?.breakout?.lookback ?? 60)))
+        if (typeof lastAtr === 'number' && close.length >= lb) {
+          const slice = close.slice(-lb)
+          const rHigh = Math.max(...slice)
+          if (Number.isFinite(rHigh)) {
+            const k = Number(cfg?.breakout?.k_atr ?? 0.5)
+            const lo = rHigh - k * lastAtr
+            const hi = rHigh + k * lastAtr
+            if (Number.isFinite(lo) && Number.isFinite(hi)) {
+              buy_zones.push({ type: 'breakout_retest', price_low: lo, price_high: hi, confidence: 0.5, rationale: `Retest zone near ${lb}d high ± ${k}·ATR` })
+            }
+          }
+        }
+      }
+
+      // Exit levels
+      const stopMaName = String(cfg?.stops?.ma || 'sma50').toLowerCase()
+      const stopBase = stopMaName === 'sma20' ? ma20v : ma50v
+      const stop_suggest = (typeof stopBase === 'number' && typeof lastAtr === 'number') ? (stopBase - Number(cfg?.stops?.atr_mult ?? 1) * lastAtr) : null
+      const multiples: number[] = Array.isArray(cfg?.targets?.multiples) ? (cfg.targets.multiples as number[]) : [1.5, 2.5]
+      const targets = (typeof price === 'number' && typeof stop_suggest === 'number' && price > stop_suggest)
+        ? multiples.map(m => price + m * (price - stop_suggest)).filter(x => Number.isFinite(x))
+        : []
+      const exit_levels = { stop_suggest, targets }
+
+      // Position health
+      function inZone(p?: number | null) {
+        if (typeof p !== 'number') return false
+        return buy_zones.some(z => p >= z.price_low && p <= z.price_high)
+      }
+      const in_buy_zone = inZone(price)
+      const dist_to_stop_pct = (typeof price === 'number' && typeof stop_suggest === 'number' && price > 0) ? Number((((price - stop_suggest) / price) * 100).toFixed(2)) : null
+      const t1 = targets[0]
+      const dist_to_t1_pct = (typeof price === 'number' && typeof t1 === 'number' && price > 0) ? Number((((t1 - price) / price) * 100).toFixed(2)) : null
+
+      // Entry readiness: base 30, +40 if in zone, +20 if trendUp, +10 if RSI in 45-65
+      let entry_readiness = 30
+      if (in_buy_zone) entry_readiness += 40
+      if (trendUp) entry_readiness += 20
+      if (typeof rsi[last] === 'number' && rsi[last]! >= 45 && rsi[last]! <= 65) entry_readiness += 10
+      entry_readiness = Math.max(0, Math.min(100, Math.round(entry_readiness)))
+
+      // Exit risk: base 20; +30 if price < SMA50; +30 if price < SMA200; +20 if dist_to_stop_pct < 5
+      let exit_risk = 20
+      if (typeof price === 'number' && typeof ma50v === 'number' && price < ma50v) exit_risk += 30
+      if (typeof price === 'number' && typeof ma200v === 'number' && price < ma200v) exit_risk += 30
+      if (typeof dist_to_stop_pct === 'number' && dist_to_stop_pct < 5) exit_risk += 20
+      exit_risk = Math.max(0, Math.min(100, Math.round(exit_risk)))
+
+      const position_health = { entry_readiness, exit_risk, in_buy_zone, dist_to_stop_pct, dist_to_t1_pct }
+
       return {
         ticker: t,
         price,
@@ -212,6 +293,9 @@ export async function GET(req: Request) {
         fundamentals,
         technicals: { provider: 'yahoo', rsi: rsi[last], atr_pct: atrPct, sma20: sma20[last], sma50: sma50[last], sma200: sma200[last], vol_ma20: vol20[last], vol_trend_up: volTrendUp, rs_ratio: rsRatio, rs_slope_30: rsSlope30, dist_52w_high_pct: distToHighPct, dist_52w_low_pct: distToLowPct },
         sentiment: { mean7, count7: last7.length },
+        buy_zones,
+        exit_levels,
+        position_health,
       }
     } catch (e: any) {
       return { ticker: t, error: e?.message || String(e), flags: ['fetch_fail'] }
