@@ -78,6 +78,7 @@ export default function Leaderboard() {
   const [onlyPriced, setOnlyPriced] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
+  const [ml, setMl] = useState<Record<string, { p: number|null; contribs?: Array<{ key: string; contrib: number }> }>>({})
 
   // Routing/URL state
   const router = useRouter()
@@ -88,7 +89,7 @@ export default function Leaderboard() {
   // Active preset is the component state; URL is just a reflection
   const activePreset: 'NONE'|'HIGH_MOM'|'UNDERVALUED'|'LOW_ATR' = preset
 
-  type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'
+  type SortKey = 'ticker'|'score'|'price'|'fund'|'tech'|'sent'|'ml'
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc'|'desc' }>({ key: 'score', dir: 'desc' })
   function toggleSort(key: SortKey) {
     setSort(s => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'ticker' ? 'asc' : 'desc' })
@@ -259,7 +260,38 @@ export default function Leaderboard() {
     } finally {
       setLoading(false)
     }
+
   }
+
+  // ML predictions: fetch for all known items in batches of 10
+  async function fetchMlForTickers(ts: string[]) {
+    if (!ts.length) return
+    const chunks: string[][] = []
+    for (let i = 0; i < ts.length; i += 10) chunks.push(ts.slice(i, i + 10))
+    const calls = chunks.map(async chunk => {
+      const qs = encodeURIComponent(chunk.join(','))
+      const url = `/api/ml/predict?tickers=${qs}`
+      try {
+        const r = await fetch(url, { cache: 'no-store' })
+        if (!r.ok) return null
+        return (await r.json()) as { preds: Array<{ ticker: string; p: number|null; contribs?: Array<{ key:string; contrib:number }> }> }
+      } catch { return null }
+    })
+    const results = await Promise.allSettled(calls)
+    const map: Record<string, { p: number|null; contribs?: Array<{ key:string; contrib:number }> }> = {}
+    results.forEach(res => {
+      if (res.status === 'fulfilled' && res.value && Array.isArray(res.value.preds)) {
+        res.value.preds.forEach(pr => { if (pr?.ticker) map[pr.ticker] = { p: pr.p, contribs: pr.contribs } })
+      }
+    })
+    setMl(prev => ({ ...prev, ...map }))
+  }
+
+  useEffect(() => {
+    const ts = items.map(r => r.ticker).filter(Boolean)
+    if (ts.length) fetchMlForTickers(ts)
+  }, [items])
+
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase()
@@ -291,6 +323,7 @@ export default function Leaderboard() {
           case 'fund': return x.fund_points ?? -Infinity
           case 'tech': return x.tech_points ?? -Infinity
           case 'sent': return x.sent_points ?? -Infinity
+          case 'ml': return ml[x.ticker]?.p ?? -Infinity
           case 'score':
           default: return x.score ?? -Infinity
         }
@@ -427,6 +460,7 @@ export default function Leaderboard() {
               <TableHead className="text-right whitespace-nowrap">
                 <button onClick={()=>toggleSort('sent')} className="inline-flex items-center gap-1" title="Sort by sentiment">Sent <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
+
               <TableHead className="whitespace-nowrap">Flags</TableHead>
               <TableHead className="text-right" />
             </TableRow>
@@ -537,3 +571,5 @@ function fmt(n?: number | null) {
   if (n == null) return '--'
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n)
 }
+
+
