@@ -23,6 +23,19 @@ export default function ChatWidget() {
   const [sending, setSending] = React.useState(false)
   const [messages, setMessages] = React.useState<{ id: number; role: 'user' | 'assistant'; content: string }[]>([])
 
+  // Auto-preselect ticker based on current route (/ticker/[id]) when opening
+  React.useEffect(() => {
+    if (!open) return
+    try {
+      const path = window.location?.pathname || ''
+      const m = path.match(/^\/ticker\/([^\/]+)$/)
+      if (m && m[1]) {
+        const id = decodeURIComponent(m[1])
+        setSelected(prev => (prev.includes(id) ? prev : [id, ...prev].slice(0, 10)))
+      }
+    } catch {}
+  }, [open])
+
   React.useEffect(() => {
     if (!open || meta) return
     setLoadingMeta(true)
@@ -151,6 +164,12 @@ export default function ChatWidget() {
             </div>
 
             <div className="mt-3">
+              {/* Preset prompts tied to selected tickers */}
+              <PresetRow
+                lang={lang}
+                selected={selected}
+                onUse={(text) => { setModel('gpt5'); setPrompt(text); setTimeout(() => { if (text) send() }, 0) }}
+              />
               <TextareaAutosize
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
@@ -162,7 +181,7 @@ export default function ChatWidget() {
                 placeholder={model === 'finbert'
                   ? (lang === 'da' ? 'Spørg om nyhedssentiment, fx: "Hvordan er stemningen for AAPL?"' : 'Ask for news sentiment, e.g., "What is the sentiment for AAPL?"')
                   : (lang === 'da' ? 'Skriv dit spørgsmål om fundamental/teknisk analyse...' : 'Ask about fundamental/technical analysis...')}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring mt-2"
               />
             </div>
 
@@ -184,6 +203,8 @@ export default function ChatWidget() {
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {m.content}
                       </ReactMarkdown>
+
+
                     </div>
                   </div>
                 </div>
@@ -204,3 +225,48 @@ export default function ChatWidget() {
   )
 }
 
+
+
+function PresetRow({ selected, lang, onUse }: { selected: string[]; lang: 'da'|'en'; onUse: (text: string)=>void }){
+  const one = selected[0]
+  const many = selected.slice(0,3)
+  const label = (txtDa: string, txtEn: string) => (lang==='da' ? txtDa : txtEn)
+  const btn = (title: string, text: string) => (
+    <button onClick={() => onUse(text)} className="text-xs px-2 py-1 rounded-full border hover:bg-accent">
+      {title}
+    </button>
+  )
+  const presets: Array<[string, string]> = []
+  if (one) {
+    presets.push([
+      label(`Forklar score for ${one}`, `Explain score for ${one}`),
+      label(`Forklar den samlede score og vigtigste drivere for ${one}.`, `Explain the total score and key drivers for ${one}.`)
+    ])
+    presets.push([
+      label(`Koeb/stop/target for ${one}`, `Buy/stop/target for ${one}`),
+      label(`Gennemgaa koebszone, foreslaaet stop og foerste target for ${one}.`, `Review buy zone, suggested stop and first target for ${one}.`)
+    ])
+    presets.push([
+      label(`Fundamentale noegletal`, `Fundamental highlights`),
+      label(`Opsummer FCF yield, vaekst, margin og vaerdiansaettelse for ${one}.`, `Summarize FCF yield, growth, margins and valuation for ${one}.`)
+    ])
+    presets.push([
+      label(`RSI/Trend`, `RSI/Trend`),
+      label(`Hvordan ser RSI, SMA50/200 og trend ud for ${one}?`, `What are RSI, SMA50/200 and trend for ${one}?`)
+    ])
+  } else if (many.length) {
+    const list = many.join(', ')
+    presets.push([
+      label(`Sammenlign ${list}`, `Compare ${list}`),
+      label(`Sammenlign score og vigtigste forskelle mellem ${list}.`, `Compare scores and key differences between ${list}.`)
+    ])
+  }
+  if (!presets.length) return null
+  return (
+    <div className="flex flex-wrap gap-2 mb-2">
+      {presets.map(([title, text], i) => (
+        <React.Fragment key={i}>{btn(title, text)}</React.Fragment>
+      ))}
+    </div>
+  )
+}
