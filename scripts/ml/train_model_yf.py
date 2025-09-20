@@ -17,7 +17,7 @@ Example:
 """
 from __future__ import annotations
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 import math
@@ -215,6 +215,9 @@ def label_future_path(df: pd.DataFrame, horizon: int, up: float, down: float) ->
 
 def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5) -> pd.DataFrame | None:
     """Robust fetch using Yahoo first (CSV + crumb), then yfinance, then Stooq as last resort."""
+    # Small delay to be respectful to Yahoo Finance servers
+    time.sleep(0.1)
+
     # 1) Try Yahoo CSV download (often more reliable in CI if crumb+cookie is set)
     df_csv = fetch_history_yahoo_csv(ticker, years, attempts=2)
     if df_csv is not None and not df_csv.empty:
@@ -243,7 +246,9 @@ def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5
                         return out
         except Exception as e:
             # yfinance sometimes returns HTML/JSONDecodeError; retry with backoff
-            pass
+            if "JSONDecodeError" in str(type(e)) or "Expecting value" in str(e):
+                print(f"Failed to get ticker '{ticker}' reason: {e}")
+            # Suppress other common yfinance errors to reduce noise
         time.sleep(pause * (a + 1))
 
     # 3) Last resort: Stooq daily CSV
@@ -377,7 +382,7 @@ def train_and_dump(out_dir: Path, years: int, horizon: int, up: float, down: flo
         coef = clf.coef_.reshape(-1).tolist()
         intercept = float(clf.intercept_.reshape(-1)[0])
 
-    ts = datetime.utcnow().strftime('%Y%m%d%H%M')
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
     version = f"{version_prefix}_{ts}_yf"
 
     artifact = {
