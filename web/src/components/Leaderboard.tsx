@@ -416,6 +416,8 @@ export default function Leaderboard() {
               <TableHead className="text-right whitespace-nowrap">
                 <button onClick={()=>toggleSort('price')} className="inline-flex items-center gap-1" title="Sort by price">Price <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
+              <TableHead className="text-right whitespace-nowrap">RSI</TableHead>
+              <TableHead className="text-right whitespace-nowrap">ATR%</TableHead>
               <TableHead className="text-right whitespace-nowrap">
                 <button onClick={()=>toggleSort('fund')} className="inline-flex items-center gap-1" title="Sort by fundamentals">Fund <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
@@ -436,6 +438,8 @@ export default function Leaderboard() {
                   <TableCell className="font-medium sticky left-0 z-10 bg-background/80 border-r"><div className="h-4 w-16 bg-muted rounded" /></TableCell>
                   <TableCell><div className="h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-14 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
+                  <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
                   <TableCell className="text-right"><div className="ml-auto h-4 w-10 bg-muted rounded" /></TableCell>
@@ -465,6 +469,12 @@ export default function Leaderboard() {
                     {(row.price == null || (row.flags||[]).some(f => f.includes('no_price_data'))) ? (
                       <Badge variant="outline" className="ml-2 border-yellow-300 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">Missing data</Badge>
                     ) : null}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {fmt((row as any)?.technicals?.rsi)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {(row as any)?.technicals?.atr_pct != null ? `${fmt((row as any)?.technicals?.atr_pct)}%` : '--'}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{row.fund_points ?? 0}</TableCell>
                   <TableCell className="text-right tabular-nums">{row.tech_points ?? 0}</TableCell>

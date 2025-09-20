@@ -46,6 +46,29 @@ export async function GET(req: Request) {
 
   const parser = new Parser()
 
+  // Benchmark (SPY) for relative strength metrics — fetch once
+  let benchMap: Record<string, number> = {}
+  try {
+    const period1 = new Date(Date.now() - 1000 * 60 * 60 * 24 * 365 * 2)
+    const chBench: any = await (yahooFinance as any).chart('SPY', { period1, interval: '1d' } as any)
+    let histB: any[] = Array.isArray(chBench?.quotes) && chBench.quotes.length ? chBench.quotes : []
+    if (!histB.length) {
+      const tsB: number[] = chBench?.timestamp || []
+      const qB = chBench?.indicators?.quote?.[0] || {}
+      histB = tsB.map((tsVal: number, i: number) => ({
+        date: new Date(tsVal * 1000),
+        close: qB?.close?.[i],
+      })).filter((x: any) => Number.isFinite(x.close))
+    }
+    benchMap = Object.fromEntries(
+      histB.map((x: any) => [ (x.date ? new Date(x.date).toISOString().slice(0, 10) : ''), Number(x.close) ])
+        .filter(([d, v]: any[]) => d && Number.isFinite(v))
+    )
+  } catch {
+    // best-effort; RS metrics will be null if SPY fetch fails
+    benchMap = {}
+  }
+
   async function fetchOne(t: string) {
     try {
       const period1 = new Date(Date.now() - 1000 * 60 * 60 * 24 * 365 * 2)
@@ -59,12 +82,14 @@ export async function GET(req: Request) {
           close: q?.close?.[i],
           high: q?.high?.[i],
           low: q?.low?.[i],
+          volume: q?.volume?.[i],
         })).filter(x => Number.isFinite(x.close) && Number.isFinite(x.high) && Number.isFinite(x.low))
       }
       if (!hist?.length) throw new Error('no price data')
       const close = hist.map(x => Number(x.close))
       const high = hist.map(x => Number(x.high))
       const low = hist.map(x => Number(x.low))
+      const volume = hist.map(x => Number(x.volume ?? 0))
       const dates = hist.map(x => (x.date ? new Date(x.date).toISOString().slice(0, 10) : undefined))
       const last = close.length - 1
       const price = close[last]
@@ -76,6 +101,36 @@ export async function GET(req: Request) {
       const atr = atr14(high, low, close, 14)
       const atrPct = atr[last] != null && price ? (atr[last]! / price) * 100 : null
       const trendUp = (sma50[last] != null && sma200[last] != null && price != null) ? ((sma50[last]! > sma200[last]!) && (price > sma200[last]!)) : false
+
+      // Volume trend (20d MA vs 5 days ago)
+      const vol20 = sma(volume, 20)
+      const volTrendUp = (vol20[last] != null && vol20[last - 5] != null) ? (vol20[last]! > vol20[last - 5]!) : null
+
+      // 52w position (approx 252 trading days)
+      const look = Math.min(252, close.length)
+      const win = close.slice(close.length - look)
+      const high52w = win.length ? Math.max(...win) : null
+      const low52w = win.length ? Math.min(...win) : null
+      const distToHighPct = (price != null && high52w != null && high52w > 0) ? ((high52w - price) / high52w) * 100 : null
+      const distToLowPct = (price != null && low52w != null && low52w > 0) ? ((price - low52w) / low52w) * 100 : null
+
+      // Relative strength vs SPY
+      let rsRatio: number | null = null
+      let rsSlope30: number | null = null
+      {
+        const d = dates[last]
+        const spyP = d ? benchMap[d] : undefined
+        if (price != null && Number.isFinite(spyP)) rsRatio = price / spyP!
+        const N = 30
+        const rsArr: number[] = []
+        for (let i = Math.max(0, close.length - N); i < close.length; i++) {
+          const d2 = dates[i]
+          const sp = d2 ? benchMap[d2] : undefined
+          const c = close[i]
+          if (Number.isFinite(c) && Number.isFinite(sp)) rsArr.push(c / (sp as number))
+        }
+        if (rsArr.length >= 5) rsSlope30 = (rsArr[rsArr.length - 1] - rsArr[0]) / rsArr.length
+      }
 
       // Fundamentals (best-effort) – fetch in two passes and be tolerant to API/type shape
       const sumA = await yahooFinance.quoteSummary(t, { modules: ['financialData', 'price'] as any }).catch(() => null)
@@ -92,6 +147,13 @@ export async function GET(req: Request) {
       const revenueGrowth = safeNum(qs?.financialData?.revenueGrowth?.raw ?? qs?.financialData?.revenueGrowth)
       const insiderOwn = safeNum(qs?.defaultKeyStatistics?.heldPercentInsiders?.raw ?? qs?.defaultKeyStatistics?.heldPercentInsiders ?? qs?.majorHoldersBreakdown?.insidersPercentHeld?.raw ?? qs?.majorHoldersBreakdown?.insidersPercentHeld)
       const fcfYield = (fcf != null && mcap != null && mcap > 0) ? (fcf / mcap) : null
+      // Additional valuation metrics (best-effort; may be null)
+      const trailingPE = safeNum(qs?.summaryDetail?.trailingPE?.raw ?? qs?.summaryDetail?.trailingPE ?? qs?.defaultKeyStatistics?.trailingPE?.raw ?? qs?.defaultKeyStatistics?.trailingPE)
+      const forwardPE = safeNum(qs?.summaryDetail?.forwardPE?.raw ?? qs?.summaryDetail?.forwardPE ?? qs?.defaultKeyStatistics?.forwardPE?.raw ?? qs?.defaultKeyStatistics?.forwardPE)
+      const peg = safeNum(qs?.defaultKeyStatistics?.pegRatio?.raw ?? qs?.defaultKeyStatistics?.pegRatio)
+      const p_s = safeNum(qs?.summaryDetail?.priceToSalesTrailing12Months?.raw ?? qs?.summaryDetail?.priceToSalesTrailing12Months)
+      const p_b = safeNum(qs?.defaultKeyStatistics?.priceToBook?.raw ?? qs?.defaultKeyStatistics?.priceToBook ?? qs?.summaryDetail?.priceToBook?.raw ?? qs?.summaryDetail?.priceToBook)
+      const ev_to_ebitda = safeNum(qs?.defaultKeyStatistics?.enterpriseToEbitda?.raw ?? qs?.defaultKeyStatistics?.enterpriseToEbitda)
 
       function scoreFundamentals() {
         let pts = 0
@@ -124,6 +186,12 @@ export async function GET(req: Request) {
         gross_margin: grossMargin,
         revenue_growth: revenueGrowth,
         insider_own: insiderOwn,
+        pe: trailingPE,
+        fwd_pe: forwardPE,
+        peg,
+        p_s,
+        p_b,
+        ev_to_ebitda,
       }
 
       const flags: string[] = []
@@ -142,7 +210,7 @@ export async function GET(req: Request) {
         sent_points: sentPoints,
         flags,
         fundamentals,
-        technicals: { provider: 'yahoo', rsi: rsi[last], atr_pct: atrPct, sma50: sma50[last], sma200: sma200[last] },
+        technicals: { provider: 'yahoo', rsi: rsi[last], atr_pct: atrPct, sma20: sma20[last], sma50: sma50[last], sma200: sma200[last], vol_ma20: vol20[last], vol_trend_up: volTrendUp, rs_ratio: rsRatio, rs_slope_30: rsSlope30, dist_52w_high_pct: distToHighPct, dist_52w_low_pct: distToLowPct },
         sentiment: { mean7, count7: last7.length },
       }
     } catch (e: any) {
