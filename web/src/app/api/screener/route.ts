@@ -137,7 +137,8 @@ export async function GET(req: Request) {
       // Fundamentals (best-effort) – fetch in two passes and be tolerant to API/type shape
       const sumA = await yahooFinance.quoteSummary(t, { modules: ['financialData', 'price'] as any }).catch(() => null)
       const sumB = await yahooFinance.quoteSummary(t, { modules: ['defaultKeyStatistics', 'majorHoldersBreakdown', 'summaryDetail'] as any }).catch(() => null)
-      const qs: any = { ...(sumA as any || {}), ...(sumB as any || {}) }
+      const sumC = await yahooFinance.quoteSummary(t, { modules: ['assetProfile', 'summaryProfile'] as any }).catch(() => null)
+      const qs: any = { ...(sumA as any || {}), ...(sumB as any || {}), ...(sumC as any || {}) }
       const mcap = safeNum(qs?.price?.marketCap?.raw ?? qs?.price?.marketCap)
       const fcf = safeNum(qs?.financialData?.freeCashflow?.raw ?? qs?.financialData?.freeCashflow ?? qs?.defaultKeyStatistics?.freeCashflow?.raw ?? qs?.defaultKeyStatistics?.freeCashflow)
       const ebitda = safeNum(qs?.financialData?.ebitda?.raw ?? qs?.financialData?.ebitda)
@@ -182,6 +183,9 @@ export async function GET(req: Request) {
       const sentPoints = (mean7 > 0.1 ? 10 : (mean7 < -0.1 ? 0 : 5)) + ((last7.length > 5) ? 5 : 0)
       const score = Math.round(0.40 * fundPoints + 0.35 * techPoints + 0.25 * sentPoints)
 
+      const sector = (qs?.assetProfile?.sector ?? qs?.summaryProfile?.sector) || null
+      const industry = (qs?.assetProfile?.industry ?? qs?.summaryProfile?.industry) || null
+
       const fundamentals = {
         fcf_yield: fcfYield,
         nd_to_ebitda: ndToEbitda,
@@ -194,6 +198,8 @@ export async function GET(req: Request) {
         p_s,
         p_b,
         ev_to_ebitda,
+        sector,
+        industry,
       }
 
       const flags: string[] = []

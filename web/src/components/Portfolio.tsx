@@ -130,7 +130,11 @@ export default function Portfolio() {
       const value = price != null ? price * h.qty : null
       const gain = price != null ? (price - h.avgCost) * h.qty : null
       const gainPct = price != null && h.avgCost ? ((price - h.avgCost) / h.avgCost) * 100 : null
-      return { ...h, price, priceFallback, value, gain, gainPct, score: s?.score ?? null }
+      const trendUp = (typeof s?.sma50 === 'number' && typeof s?.sma200 === 'number' && typeof s?.price === 'number') ? ((s!.sma50 as number) > (s!.sma200 as number) && (s!.price as number) > (s!.sma200 as number)) : null
+      const inZone = (s as any)?.position_health?.in_buy_zone ?? null
+      const distStop = (s as any)?.position_health?.dist_to_stop_pct ?? null
+      const sector = (s as any)?.fundamentals?.sector ?? null
+      return { ...h, price, priceFallback, value, gain, gainPct, score: s?.score ?? null, trendUp, inZone, distStop, sector }
     })
   }, [holdings, dataMap])
 
@@ -141,6 +145,15 @@ export default function Portfolio() {
     const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : null
     const avgScore = rows.length ? (rows.reduce((a,r)=> a + (r.score ?? 0), 0) / rows.length) : null
     return { totalValue, totalCost, totalGain, totalGainPct, avgScore }
+  }, [rows])
+
+  const sectorAlloc = useMemo(() => {
+    const weights = rows.map(r => ({ sector: (r.sector ?? 'Unknown') as string, w: (r.value ?? (r.qty * r.avgCost)) || 0 }))
+    const total = weights.reduce((a, x) => a + x.w, 0)
+    const map = new Map<string, number>()
+    for (const { sector, w } of weights) map.set(sector, (map.get(sector) || 0) + w)
+    const list = Array.from(map.entries()).map(([sector, w]) => ({ sector, pct: total > 0 ? (w / total) * 100 : 0 }))
+    return list.sort((a,b) => b.pct - a.pct)
   }, [rows])
 
   const sortedRows = useMemo(() => {
@@ -231,6 +244,7 @@ export default function Portfolio() {
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-sm text-muted-foreground">Avg cost</label>
+
           <Input type="number" value={form.avgCost} onChange={e=>setForm({...form, avgCost:Number(e.target.value)})} className="w-28" />
         </div>
         <Button onClick={addHolding}>Add/Update</Button>
@@ -272,6 +286,7 @@ export default function Portfolio() {
               <TableHead className="text-right">
                 <button onClick={()=>toggleSort('score')} className="inline-flex items-center gap-1">Score <ArrowUpDown className="h-3.5 w-3.5 opacity-60" /></button>
               </TableHead>
+              <TableHead className="text-right">Health</TableHead>
               <TableHead className="text-right" />
             </TableRow>
           </TableHeader>
@@ -298,7 +313,27 @@ export default function Portfolio() {
                     </Tooltip.Portal>
                   </Tooltip.Root>
                 </TableCell>
+                <TableCell className="text-right">
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <Badge className={((r.trendUp === true && r.inZone === true && (r.distStop ?? 99) >= 5) ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' : ((r.trendUp === false || r.inZone === false || (typeof r.distStop === 'number' && r.distStop < 3)) ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300' : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-200'))}>
+                        {(r.trendUp === true ? 'Trend↑' : (r.trendUp === false ? 'Trend↓' : 'Trend?'))}
+                        {' / '}
+                        {(r.inZone === true ? 'In‑zone' : (r.inZone === false ? 'Out' : 'Zone?'))}
+                        {' / '}
+                        {r.distStop == null ? 'dStop?' : `dStop ${r.distStop}%`}
+                      </Badge>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+                        {`Trend: ${r.trendUp == null ? 'unknown' : (r.trendUp ? 'up' : 'down')}`} · {`In buy zone: ${r.inZone == null ? 'unknown' : (r.inZone ? 'yes' : 'no')}`} · {`Dist→Stop: ${r.distStop == null ? '--' : r.distStop + '%'}`}
+                        <Tooltip.Arrow className="fill-border" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </TableCell>
                 <TableCell className="text-right"><Button variant="outline" size="sm" onClick={()=>removeHolding(r.ticker)}>Remove</Button></TableCell>
+
               </TableRow>
             ))}
             <TableRow className="font-medium sticky bottom-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-20 border-t">
@@ -323,6 +358,20 @@ export default function Portfolio() {
         <span>Showing {sortedRows.length} of {rows.length}</span>
         <span>Average score: {totals.avgScore == null ? '--' : totals.avgScore.toFixed(1)}</span>
       </div>
+
+      {/* Diversification by sector (simple) */}
+      {sectorAlloc.length ? (
+        <div className="mt-3 text-sm text-muted-foreground">
+          <strong>Diversification:</strong>
+          <span className="ml-2">
+            {sectorAlloc.slice(0,6).map((s: {sector:string;pct:number}) => (
+              <span key={s.sector} className="mr-3">{s.sector}: {s.pct.toFixed(1)}%</span>
+            ))}
+            {sectorAlloc.length > 6 ? `+${sectorAlloc.length - 6} more` : ''}
+          </span>
+        </div>
+      ) : null}
+
       </Tooltip.Provider>
     </section>
   )
