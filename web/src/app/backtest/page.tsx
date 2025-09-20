@@ -26,16 +26,32 @@ export default function BacktestPage(){
   const [error, setError] = React.useState<string|undefined>()
   const [run, setRun] = React.useState<any>(null)
   const [runId, setRunId] = React.useState<string|undefined>()
+  const [trades, setTrades] = React.useState<any[]>([])
+  const [asyncMode, setAsyncMode] = React.useState(false)
   const [history, setHistory] = React.useState<any[]>([])
+  const [historyTotal, setHistoryTotal] = React.useState(0)
+  const [historyPage, setHistoryPage] = React.useState(1)
+  const [historyPageSize, setHistoryPageSize] = React.useState(10)
+  const [tickerFilter, setTickerFilter] = React.useState('')
+  const [dateFrom, setDateFrom] = React.useState<string>('')
+  const [dateTo, setDateTo] = React.useState<string>('')
+  const [presets, setPresets] = React.useState<any[]>([])
+  const [presetName, setPresetName] = React.useState('')
 
   async function loadHistory(){
     try{
-      const r = await fetch('/api/backtest/list?limit=20', { cache:'no-store' })
+      const qs = new URLSearchParams()
+      qs.set('page', String(historyPage))
+      qs.set('pageSize', String(historyPageSize))
+      if (tickerFilter.trim()) qs.set('ticker', tickerFilter.trim().toUpperCase())
+      if (dateFrom) qs.set('from', dateFrom)
+      if (dateTo) qs.set('to', dateTo)
+      const r = await fetch(`/api/backtest/list?${qs.toString()}`, { cache:'no-store' })
       const j = await r.json()
-      if(r.ok) setHistory(j?.items||[])
+      if(r.ok){ setHistory(j?.items||[]); setHistoryTotal(Number(j?.total||0)) }
     }catch{}
   }
-  React.useEffect(()=>{ loadHistory() }, [])
+  React.useEffect(()=>{ loadHistory() }, [historyPage, historyPageSize])
 
   async function loadRun(id:string){
     setLoading(true); setError(undefined)
@@ -43,27 +59,87 @@ export default function BacktestPage(){
       const r = await fetch(`/api/backtest?id=${encodeURIComponent(id)}`, { cache:'no-store' })
       const j = await r.json()
       if(!r.ok || j?.error) throw new Error(j?.error || `HTTP ${r.status}`)
-      // Reconstruct UI summary shape from stored run
       const perTicker = Array.isArray(j?.run?.summary?.perTicker) ? j.run.summary.perTicker : []
       const summary = j?.run?.summary || {}
       const equityCurve = j?.run?.equity || []
       setRun({ summary, perTicker, equityCurve })
       setRunId(j?.run?.id)
+      setTrades(Array.isArray(j?.trades)? j.trades: [])
     }catch(e:any){ setError(e?.message || String(e)) }
     finally{ setLoading(false) }
   }
 
   async function runBacktest(){
-    setLoading(true); setError(undefined); setRun(null); setRunId(undefined)
+    setLoading(true); setError(undefined); setRun(null); setRunId(undefined); setTrades([])
     try{
-      const body = { tickers: tickers.split(',').map(t=>t.trim()).filter(Boolean), lookbackYears, params }
+      const body: any = { tickers: tickers.split(',').map(t=>t.trim()).filter(Boolean), lookbackYears, params }
+      if (asyncMode) body.mode = 'async'
       const r = await fetch('/api/backtest', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
       const j = await r.json()
       if(!r.ok || j?.error){ throw new Error(j?.error || `HTTP ${r.status}`) }
       setRun(j); setRunId(j?.run_id); loadHistory()
+      if (j?.run_id){
+        // fetch trades/details
+        try { await loadRun(j.run_id) } catch {}
+        if (asyncMode){
+          // Poll status until completed (lightweight)
+          const id = j.run_id
+          let tries = 0
+          const iv = setInterval(async()=>{
+            tries++
+            try{
+              const rr = await fetch(`/api/backtest?id=${encodeURIComponent(id)}`, { cache:'no-store' })
+              const jj = await rr.json()
+              if (jj?.run?.status === 'completed') { setTrades(jj.trades||[]); clearInterval(iv) }
+              if (tries > 20) clearInterval(iv)
+            }catch{}
+          }, 1500)
+        }
+      }
     }catch(e:any){ setError(e?.message || String(e)) }
     finally{ setLoading(false) }
   }
+  async function loadPresets(){
+    try{
+      const r = await fetch('/api/backtest/presets', { cache:'no-store' })
+      const j = await r.json()
+      if (r.ok) setPresets(j?.items||[])
+    }catch{}
+  }
+  React.useEffect(()=>{ loadPresets() }, [])
+
+  async function savePreset(){
+    try{
+      if (!presetName.trim()) return
+      const r = await fetch('/api/backtest/presets', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ name: presetName.trim(), params }) })
+      const j = await r.json()
+      if (!r.ok || j?.error) throw new Error(j?.error || `HTTP ${r.status}`)
+      setPresetName(''); loadPresets()
+    }catch(e:any){ setError(e?.message || String(e)) }
+  }
+
+  function applyPreset(id: string){
+    const p = presets.find(x=>x.id===id)
+    if (p && p.params) setParams(p.params)
+  }
+
+  const [presetA, setPresetA] = React.useState<string>('')
+  const [presetB, setPresetB] = React.useState<string>('')
+  const [compare, setCompare] = React.useState<any[]>([])
+  async function runCompare(){
+    const picks = [presetA, presetB].filter(Boolean)
+    const results: any[] = []
+    for (const id of picks){
+      const p = presets.find(x=>x.id===id)
+      if (!p) continue
+      const body = { tickers: tickers.split(',').map(t=>t.trim()).filter(Boolean), lookbackYears, params: p.params }
+      const r = await fetch('/api/backtest', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) })
+      const j = await r.json()
+      if (r.ok && !j?.error) results.push({ name: p.name, summary: j.summary })
+    }
+    setCompare(results)
+  }
+
 
   const labels = (run?.equityCurve||[]).map((p:any)=>String(p.i))
   const eq = (run?.equityCurve||[]).map((p:any)=>p.eq)
@@ -75,6 +151,50 @@ export default function BacktestPage(){
         <p className="text-sm opacity-80">Kør backtests over 1–5 år og justér parametre. Resultat gemmes i Supabase.</p>
       </div>
 
+
+          <div className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={asyncMode} onChange={e=>setAsyncMode(e.target.checked)} />
+            <span>Async mode (poll efter status)</span>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            <div className="text-xs font-medium opacity-80">Presets</div>
+            <div className="flex items-center gap-2">
+              <input value={presetName} onChange={e=>setPresetName(e.target.value)} placeholder="Navn..." className="rounded border bg-background px-2 py-1"/>
+              <button onClick={savePreset} className="rounded border px-3 py-1.5 text-sm">Gem preset</button>
+            </div>
+            <div className="flex items-center gap-2">
+              <select onChange={e=>applyPreset(e.target.value)} className="rounded border bg-background px-2 py-1">
+                <option value="">Indlæs preset...</option>
+                {presets.map(p=> <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <span className="text-xs opacity-60">Loader overskriver felterne ovenfor</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <select value={presetA} onChange={e=>setPresetA(e.target.value)} className="rounded border bg-background px-2 py-1">
+                <option value="">A</option>
+                {presets.map(p=> <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <select value={presetB} onChange={e=>setPresetB(e.target.value)} className="rounded border bg-background px-2 py-1">
+                <option value="">B</option>
+                {presets.map(p=> <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <button onClick={runCompare} className="rounded border px-3 py-1.5 text-sm">Kør compare</button>
+            </div>
+            {compare?.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left opacity-70"><tr><th className="py-1">Preset</th><th>Trades</th><th>Hit</th><th>Exp (R)</th></tr></thead>
+                  <tbody>
+                    {compare.map((c:any)=> (
+                      <tr key={c.name} className="border-t"><td className="py-1">{c.name}</td><td>{c.summary?.trades ?? '-'}</td><td>{c.summary?.hit_rate != null ? Math.round(c.summary.hit_rate*100)+'%' : '-'}</td><td>{c.summary?.expectancy_R ?? '-'}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+
       <div className="grid md:grid-cols-2 gap-6">
         <div className="space-y-3 rounded-lg border p-4">
           <label className="text-sm">
@@ -85,6 +205,38 @@ export default function BacktestPage(){
             <div className="opacity-80 mb-1">Lookback (år)</div>
             <select value={lookbackYears} onChange={e=>setLookbackYears(Number(e.target.value))} className="w-32 rounded border bg-background px-2 py-1">
               {[1,2,3,4,5].map(n=> <option key={n} value={n}>{n} år</option> )}
+
+      {trades?.length ? (
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium mb-2">Trades (seneste {Math.min(trades.length, 200)})</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left opacity-70">
+                <tr>
+                  <th className="py-1">Ticker</th><th>Entry</th><th>Exit</th><th>Pris ind</th><th>Pris ud</th><th>R</th><th>%</th><th>Bars</th><th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.slice(0,200).map((t:any, i:number)=> (
+                  <tr key={i} className="border-t">
+                    <td className="py-1">{t.ticker}</td>
+                    <td>{t.entry_date}</td>
+                    <td>{t.exit_date}</td>
+                    <td>{t.entry_price}</td>
+                    <td>{t.exit_price}</td>
+                    <td>{t.r}</td>
+                    <td>{t.pnl_pct}</td>
+                    <td>{t.bars_held}</td>
+                    <td>{t.exit_reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+
             </select>
           </label>
 
@@ -105,6 +257,7 @@ export default function BacktestPage(){
             <label className="flex items-center gap-2 text-sm">
               <span className="w-40 opacity-80">RSI min</span>
               <input type="number" value={params.filters.rsiRange[0]} onChange={e=>setParams((p:any)=>({...p, filters:{...p.filters, rsiRange:[Number(e.target.value), p.filters.rsiRange[1]]}}))} className="w-20 rounded border bg-background px-2 py-1"/>
+
             </label>
             <label className="flex items-center gap-2 text-sm">
               <span className="w-40 opacity-80">RSI max</span>
@@ -170,8 +323,55 @@ export default function BacktestPage(){
         </div>
       ): null}
 
+
+      {trades?.length ? (
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium mb-2">Trades (viser op til 200)</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left opacity-70">
+                <tr>
+                  <th className="py-1">Ticker</th><th>Entry</th><th>Exit</th><th>Pris ind</th><th>Pris ud</th><th>R</th><th>%</th><th>Bars</th><th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.slice(0,200).map((t:any, i:number)=> (
+                  <tr key={i} className="border-t">
+                    <td className="py-1">{t.ticker}</td>
+                    <td>{t.entry_date}</td>
+                    <td>{t.exit_date}</td>
+                    <td>{t.entry_price}</td>
+                    <td>{t.exit_price}</td>
+                    <td>{t.r}</td>
+                    <td>{t.pnl_pct}</td>
+                    <td>{t.bars_held}</td>
+                    <td>{t.exit_reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
       <div className="rounded-lg border p-4">
         <div className="text-sm font-medium mb-2">Seneste backtests</div>
+        <div className="flex flex-wrap items-end gap-2 mb-2">
+          <label className="text-sm">
+            <div className="opacity-70 text-xs">Ticker</div>
+            <input value={tickerFilter} onChange={e=>setTickerFilter(e.target.value)} placeholder="f.eks. NVO" className="rounded border bg-background px-2 py-1"/>
+          </label>
+          <label className="text-sm">
+            <div className="opacity-70 text-xs">Fra</div>
+            <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} className="rounded border bg-background px-2 py-1"/>
+          </label>
+          <label className="text-sm">
+            <div className="opacity-70 text-xs">Til</div>
+            <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} className="rounded border bg-background px-2 py-1"/>
+          </label>
+          <button onClick={()=>{ setHistoryPage(1); loadHistory() }} className="rounded border px-3 py-1.5 text-sm">Anvend</button>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-left opacity-70">
@@ -191,6 +391,13 @@ export default function BacktestPage(){
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="flex items-center justify-between mt-2 text-sm">
+          <div>Side {historyPage} af {Math.max(1, Math.ceil((historyTotal||0) / historyPageSize))} ({historyTotal} runs)</div>
+          <div className="flex gap-2">
+            <button disabled={historyPage<=1} onClick={()=>setHistoryPage(p=>Math.max(1,p-1))} className="rounded border px-3 py-1.5 disabled:opacity-50">Forrige</button>
+            <button disabled={historyPage >= Math.ceil((historyTotal||0)/historyPageSize)} onClick={()=>setHistoryPage(p=>p+1)} className="rounded border px-3 py-1.5 disabled:opacity-50">Næste</button>
+          </div>
         </div>
       </div>
 

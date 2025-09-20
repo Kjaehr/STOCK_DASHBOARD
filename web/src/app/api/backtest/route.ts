@@ -83,6 +83,34 @@ async function insertTrades(run_id: string, trades: any[]) {
   })
   if (!res.ok) throw new Error(`insert trades failed: ${res.status} ${await res.text().catch(()=> '')}`)
 }
+async function insertRunRecord({ tickers, lookback_days, params, status, summary, equity }: any){
+  const SUPABASE_URL = env('SUPABASE_URL')!
+  const SERVICE = (env('SUPABASE_SERVICE_ROLE', false) || env('SUPABASE_KEY', false)) as string
+  const base = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1`
+  const res = await fetch(`${base}/backtest_runs`, {
+    method: 'POST',
+    headers: { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, 'Prefer': 'return=representation', 'Content-Type': 'application/json' },
+    body: JSON.stringify([{ tickers, lookback_days, params, status, summary, equity }])
+  })
+  if (!res.ok) throw new Error(`insert run failed: ${res.status} ${await res.text().catch(()=> '')}`)
+  const rows = await res.json().catch(()=> [])
+  const id = rows?.[0]?.id
+  if (!id) throw new Error('insert run: missing id in response')
+  return id as string
+}
+
+async function updateRunSummary(run_id: string, patch: any){
+  const SUPABASE_URL = env('SUPABASE_URL')!
+  const SERVICE = (env('SUPABASE_SERVICE_ROLE', false) || env('SUPABASE_KEY', false)) as string
+  const base = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1`
+  const res = await fetch(`${base}/backtest_runs?id=eq.${encodeURIComponent(run_id)}`, {
+    method: 'PATCH',
+    headers: { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch)
+  })
+  if (!res.ok) throw new Error(`update run failed: ${res.status} ${await res.text().catch(()=> '')}`)
+}
+
 
 export async function POST(req: Request) {
   try {
@@ -96,6 +124,12 @@ export async function POST(req: Request) {
     const lookbackDays = Math.round(lookbackYears * 365 + 7)
 
     const params: StrategyParams = body?.params || {}
+
+    const mode = String(body?.mode || 'auto')
+    let run_id_pre: string | undefined
+    if (mode === 'async') {
+      try { run_id_pre = await insertRunRecord({ tickers, lookback_days: lookbackDays, params, status: 'running' }) } catch {}
+    }
 
     // Fetch data with small concurrency
     async function pLimit<T>(n: number, tasks: (()=>Promise<T>)[]) {
@@ -132,8 +166,15 @@ export async function POST(req: Request) {
 
     let run_id: string | undefined
     try {
-      run_id = await insertRun(tickers, lookbackDays, params, { ...agg.summary, perTicker: perTicker.map((r: any) => ({ ticker: r.ticker, ...r.summary })) }, agg.equityCurve)
-      await insertTrades(run_id, flatTrades)
+      const finalSummary = { ...agg.summary, perTicker: perTicker.map((r: any) => ({ ticker: r.ticker, ...r.summary })) }
+      if (run_id_pre) {
+        await updateRunSummary(run_id_pre, { status: 'completed', summary: finalSummary, equity: agg.equityCurve })
+        await insertTrades(run_id_pre, flatTrades)
+        run_id = run_id_pre
+      } else {
+        run_id = await insertRun(tickers, lookbackDays, params, finalSummary, agg.equityCurve)
+        await insertTrades(run_id, flatTrades)
+      }
     } catch (e) {
       // If Supabase is not configured, we still return results
       console.warn('backtest: persist skipped/failed:', (e as any)?.message || String(e))
