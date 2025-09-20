@@ -49,6 +49,13 @@ FEATURE_ORDER = [
     'atr_bucket_2',
     'atr_bucket_3',
     'atr_bucket_4',
+    # Enhanced technical features
+    'vol20_rising',
+    'price_gt_ma20',
+    'rsi_oversold',
+    'rsi_overbought',
+    'sma_alignment',
+    'above_all_smas',
 ]
 
 
@@ -166,11 +173,20 @@ def atr_pct(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
-    out['price_over_sma20'] = df['Close'] / df['Close'].rolling(20, min_periods=20).mean()
-    out['price_over_sma50'] = df['Close'] / df['Close'].rolling(50, min_periods=50).mean()
-    out['price_over_sma200'] = df['Close'] / df['Close'].rolling(200, min_periods=200).mean()
-    out['rsi_norm'] = (rsi(df['Close']).fillna(50.0) / 100.0)
+
+    # Basic technical features
+    sma20 = df['Close'].rolling(20, min_periods=20).mean()
+    sma50 = df['Close'].rolling(50, min_periods=50).mean()
+    sma200 = df['Close'].rolling(200, min_periods=200).mean()
+
+    out['price_over_sma20'] = df['Close'] / sma20
+    out['price_over_sma50'] = df['Close'] / sma50
+    out['price_over_sma200'] = df['Close'] / sma200
+
+    rsi_values = rsi(df['Close']).fillna(50.0)
+    out['rsi_norm'] = rsi_values / 100.0
     out['atr_pct'] = atr_pct(df).fillna(0.0)
+
     # ATR buckets: [-inf,1),[1,2),[2,4),[4,8),[8,inf)
     edges = [-math.inf, 1, 2, 4, 8, math.inf]
     def bucketize(x: float) -> int:
@@ -181,6 +197,21 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     b = out['atr_pct'].apply(bucketize)
     for i in range(5):
         out[f'atr_bucket_{i}'] = (b == i).astype(float)
+
+    # Enhanced technical features
+    vol20 = df['Volume'].rolling(20, min_periods=20).mean()
+    vol20_prev = vol20.shift(1)
+    out['vol20_rising'] = (vol20 > vol20_prev).astype(float)
+    out['price_gt_ma20'] = (df['Close'] > sma20).astype(float)
+
+    # Momentum features
+    out['rsi_oversold'] = (rsi_values < 30).astype(float)
+    out['rsi_overbought'] = (rsi_values > 70).astype(float)
+
+    # Price position features
+    out['sma_alignment'] = ((sma20 > sma50) & (sma50 > sma200)).astype(float)
+    out['above_all_smas'] = ((df['Close'] > sma20) & (df['Close'] > sma50) & (df['Close'] > sma200)).astype(float)
+
     return out
 
 

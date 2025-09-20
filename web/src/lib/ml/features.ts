@@ -33,6 +33,24 @@ export function toBaseFeatures(x: any): BaseFeatures {
   const sent7 = num(x?.sentiment?.mean7)
   if (sent7 != null) f.sent_mean7 = sent7
 
+  // Enhanced technical features
+  const vol20_rising = x?.technicals?.vol20_rising
+  const price_gt_ma20 = x?.technicals?.price_gt_ma20
+  if (vol20_rising != null) f.vol20_rising = vol20_rising ? 1 : 0
+  if (price_gt_ma20 != null) f.price_gt_ma20 = price_gt_ma20 ? 1 : 0
+
+  // Momentum features
+  if (rsi != null) {
+    f.rsi_oversold = rsi < 30 ? 1 : 0
+    f.rsi_overbought = rsi > 70 ? 1 : 0
+  }
+
+  // Price position features
+  if (price != null && sma20 != null && sma50 != null && sma200 != null) {
+    f.sma_alignment = (sma20 > sma50 && sma50 > sma200) ? 1 : 0
+    f.above_all_smas = (price > sma20 && price > sma50 && price > sma200) ? 1 : 0
+  }
+
   return f
 }
 
