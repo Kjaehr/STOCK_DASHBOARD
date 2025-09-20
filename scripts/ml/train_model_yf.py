@@ -65,7 +65,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     loss = (-delta.where(delta < 0, 0.0)).rolling(window=period, min_periods=period).mean()
     rs = gain / loss.replace(0, np.nan)
     out = 100 - (100 / (1 + rs))
-    return out.fillna(method='bfill')
+    return out.bfill()
 
 
 def atr_pct(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -156,12 +156,15 @@ def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5
         time.sleep(pause * (a + 1))
 
     # Fallback: try Stooq daily CSV
+    print(f"[fetch_history] Yahoo failed for {ticker} after {attempts} attempts; falling back to Stooq")
     try:
         df_s = fetch_history_stooq(ticker, years)
         if df_s is not None and not df_s.empty:
+            print(f"[fetch_history] Using Stooq for {ticker}: {len(df_s)} rows")
             return df_s
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[fetch_history] Stooq fallback error for {ticker}: {e}")
+    print(f"[fetch_history] No data for {ticker} from Yahoo or Stooq")
     return None
 
 
@@ -220,24 +223,28 @@ def build_dataset(tickers: List[str], years: int, horizon: int, up: float, down:
             break
         df = fetch_history(t, years)
         if df is None or df.empty:
+            print(f"[dataset] no data for {t}; skipping")
             continue
         feats = build_features(df)
         lbl = label_future_path(df, horizon=horizon, up=up, down=down)
         # Align: drop rows with NaNs in features (due to warmup)
         Z = feats.join(lbl.rename('y')).dropna()
         if Z.empty:
+            print(f"[dataset] features empty after warmup for {t}; skipping")
             continue
         # Use data that still allows a full horizon window
         # Drop the last horizon rows where label would be truncated by series end
         if len(Z) > horizon:
             Z = Z.iloc[:-horizon]
         else:
+            print(f"[dataset] not enough rows after horizon trim for {t}; skipping")
             continue
         X_rows.extend(Z[FEATURE_ORDER].astype(float).values.tolist())
         Y_rows.extend(Z['y'].astype(int).values.tolist())
         used += 1
+        print(f"[dataset] used {t} samples={len(Z)} (tickers used={used}/{max_tickers})")
     if not X_rows:
-        raise RuntimeError('No samples built from yfinance data')
+        raise RuntimeError('No samples built from available data sources (Yahoo/Stooq)')
     X = np.asarray(X_rows, dtype=np.float64)
     y = np.asarray(Y_rows, dtype=np.int32)
     return X, y
