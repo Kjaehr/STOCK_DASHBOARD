@@ -25,6 +25,9 @@ import json
 import random
 import time
 from io import StringIO
+import re
+import logging
+from urllib.parse import quote_plus
 
 import numpy as np
 import pandas as pd
@@ -57,7 +60,88 @@ SESSION.headers.update({
     'Accept-Language': 'en-US,en;q=0.5',
     'Connection': 'keep-alive',
 })
+# Reduce yfinance log noise in CI
+logging.getLogger('yfinance').setLevel(logging.ERROR)
 
+
+
+# --- Yahoo CSV (crumb) helpers ---
+
+def _yahoo_get_crumb_and_cookies(symbol: str) -> tuple[str | None, dict]:
+    url = f"https://finance.yahoo.com/quote/{symbol}/history?p={symbol}"
+    r = SESSION.get(url, timeout=15)
+    if r.status_code != 200 or not r.text:
+        return None, {}
+    m = re.search(r'CrumbStore\":\{\"crumb\":\"(.*?)\"\}', r.text)
+    if not m:
+        # Sometimes present without extra escapes
+        m = re.search(r'"crumb":"(.*?)"', r.text)
+    if not m:
+        return None, dict(r.cookies)
+    crumb = m.group(1)
+    # Unescape common sequences
+    crumb = crumb.replace('\\u002F', '/').replace('\\u003D', '=')
+    return crumb, dict(r.cookies)
+
+
+def fetch_history_yahoo_csv(ticker: str, years: int, attempts: int = 2) -> pd.DataFrame | None:
+    """Fetch daily OHLC from Yahoo CSV download with crumb+cookies. Auto-adjust OHLC via Adj Close factor."""
+    # Compute periods
+    end = int(pd.Timestamp.utcnow().timestamp())
+    start_ts = pd.Timestamp.utcnow() - pd.DateOffset(years=years)
+    start = int(start_ts.timestamp())
+    last_err = None
+    for a in range(attempts):
+        try:
+            crumb, cookies = _yahoo_get_crumb_and_cookies(ticker)
+            params = {
+                'period1': str(start),
+                'period2': str(end),
+                'interval': '1d',
+                'events': 'history',
+                'includeAdjustedClose': 'true',
+            }
+            if crumb:
+                params['crumb'] = crumb
+            q = '&'.join(f"{k}={quote_plus(v)}" for k, v in params.items())
+            url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}?{q}"
+            r = SESSION.get(url, cookies=cookies or None, timeout=20, allow_redirects=True)
+            if r.status_code != 200 or not r.text or r.text.lstrip().startswith('<'):
+                last_err = f"status={r.status_code}"
+                time.sleep(1.0 + 0.5 * a)
+                continue
+            df = pd.read_csv(StringIO(r.text))
+            if df is None or df.empty or 'Close' not in df.columns:
+                last_err = 'empty/invalid CSV'
+                time.sleep(0.5)
+                continue
+            # Parse and index
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                df = df.dropna(subset=['Date']).set_index('Date').sort_index()
+            # Auto-adjust OHLC using Adj Close factor if present
+            if 'Adj Close' in df.columns and 'Close' in df.columns:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    factor = (df['Adj Close'] / df['Close']).replace([np.inf, -np.inf], np.nan)
+                for c in ['Open', 'High', 'Low', 'Close']:
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors='coerce') * factor
+                # Prefer adjusted close for Close
+                df['Close'] = df['Adj Close']
+            # Keep required columns
+            keep = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+            df = df[keep].dropna(subset=['Open', 'High', 'Low', 'Close'])
+            if df.empty:
+                last_err = 'dropna empty'
+                continue
+            return df
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1.0 + 0.5 * a)
+            continue
+    if last_err:
+        print(f"[yahoo_csv] failed for {ticker}: {last_err}")
+    return None
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
@@ -130,8 +214,14 @@ def label_future_path(df: pd.DataFrame, horizon: int, up: float, down: float) ->
 
 
 def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5) -> pd.DataFrame | None:
-    """Robust fetch using yfinance with retries and a shared session. Falls back to Stooq CSV if Yahoo fails."""
-    # Prefer download() which hits batch endpoints reliably; but we call per ticker to keep memory low
+    """Robust fetch using Yahoo first (CSV + crumb), then yfinance, then Stooq as last resort."""
+    # 1) Try Yahoo CSV download (often more reliable in CI if crumb+cookie is set)
+    df_csv = fetch_history_yahoo_csv(ticker, years, attempts=2)
+    if df_csv is not None and not df_csv.empty:
+        print(f"[fetch_history] Using Yahoo CSV for {ticker}: {len(df_csv)} rows")
+        return df_csv
+
+    # 2) Fallback to yfinance download with retries
     for a in range(attempts):
         try:
             df = yf.download(
@@ -146,18 +236,19 @@ def fetch_history(ticker: str, years: int, attempts: int = 3, pause: float = 1.5
             )
             if isinstance(df, pd.DataFrame) and not df.empty:
                 cols = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
-                if len(cols) >= 4:  # must have O/H/L/C (Volume optional)
+                if len(cols) >= 4:
                     out = df[cols].dropna()
                     if not out.empty:
+                        print(f"[fetch_history] Using yfinance for {ticker}: {len(out)} rows")
                         return out
-        except Exception:
+        except Exception as e:
             # yfinance sometimes returns HTML/JSONDecodeError; retry with backoff
             pass
         time.sleep(pause * (a + 1))
 
-    # Fallback: try Stooq daily CSV
-    print(f"[fetch_history] Yahoo failed for {ticker} after {attempts} attempts; falling back to Stooq")
+    # 3) Last resort: Stooq daily CSV
     try:
+        print(f"[fetch_history] Yahoo failed for {ticker}; trying Stooq")
         df_s = fetch_history_stooq(ticker, years)
         if df_s is not None and not df_s.empty:
             print(f"[fetch_history] Using Stooq for {ticker}: {len(df_s)} rows")
