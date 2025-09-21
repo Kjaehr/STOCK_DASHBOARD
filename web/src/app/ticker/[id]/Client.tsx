@@ -149,7 +149,20 @@ export default function TickerClient({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
   const [metaCached, setMetaCached] = useState(false)
-  const [ml, setMl] = useState<{ p: number|null; contribs?: Array<{ key: string; contrib: number }> } | null>(null)
+  const [ml, setMl] = useState<{
+    p: number|null;
+    contribs?: Array<{ key: string; contrib: number }>;
+    multiclass?: {
+      prediction: string;
+      confidence: number;
+      probabilities: Record<string, number>;
+    };
+    model_info?: {
+      version: string;
+      model_type: string;
+      ensemble_models?: string[];
+    };
+  } | null>(null)
 
   // RS vs SPY state
   const [spySeries, setSpySeries] = useState<{dates:string[]; close:(number|null)[]} | null>(null)
@@ -237,9 +250,28 @@ export default function TickerClient({ id }: { id: string }) {
       try {
         const r = await fetch(`/api/ml/predict?tickers=${encodeURIComponent(id)}`, { cache: 'no-store' })
         if (!r.ok) return
-        const j = await r.json() as { preds?: Array<{ ticker: string; p: number|null; contribs?: Array<{ key: string; contrib: number }> }> }
+        const j = await r.json() as { preds?: Array<{
+          ticker: string;
+          p: number|null;
+          contribs?: Array<{ key: string; contrib: number }>;
+          multiclass?: {
+            prediction: string;
+            confidence: number;
+            probabilities: Record<string, number>;
+          };
+          model_info?: {
+            version: string;
+            model_type: string;
+            ensemble_models?: string[];
+          };
+        }> }
         const pr = (j?.preds || []).find(x => x.ticker === id)
-        if (active) setMl(pr ? { p: pr.p ?? null, contribs: pr.contribs } : { p: null })
+        if (active) setMl(pr ? {
+          p: pr.p ?? null,
+          contribs: pr.contribs,
+          multiclass: pr.multiclass,
+          model_info: pr.model_info
+        } : { p: null })
       } catch {
         if (active) setMl({ p: null })
       }
@@ -393,7 +425,35 @@ export default function TickerClient({ id }: { id: string }) {
           <span style={{padding:'4px 10px', borderRadius:16, background:'#f4f7ff', border:'1px solid #e3e9ff', color:scoreColor(data?.score), fontWeight:600}}>Score: {data?.score ?? '--'}</span>
           <small style={{color:'#666'}}>Updated: {data?.updated_at ?? '--'}{usingCache ? ' (cache)' : ''}</small>
           <small style={{color:'#666'}}>Data refresh: {timeAgo(meta?.generated_at)}{metaCached ? ' (cache)' : ''}</small>
-          <span style={chip} title={(() => { const arr = (ml?.contribs||[]).slice(0,3).map(c=>`${c.key}: ${c.contrib>=0?'+':''}${c.contrib.toFixed(2)}`); return arr.length ? `Linear model drivers: ${arr.join(', ')}` : undefined })()}>ML: {ml?.p==null? '--' : `${Math.round((ml.p||0)*100)}%`}</span>
+          <span style={chip} title={(() => {
+            if (ml?.multiclass) {
+              const probTips = Object.entries(ml.multiclass.probabilities || {})
+                .sort(([,a], [,b]) => (b as number) - (a as number))
+                .slice(0, 3)
+                .map(([cls, prob]) => `${cls}: ${((prob as number) * 100).toFixed(0)}%`)
+                .join(', ')
+              return `Ensemble Model v3 - ${probTips}`
+            }
+            const arr = (ml?.contribs||[]).slice(0,3).map(c=>`${c.key}: ${c.contrib>=0?'+':''}${c.contrib.toFixed(2)}`);
+            return arr.length ? `Linear model drivers: ${arr.join(', ')}` : undefined
+          })()}>
+            {ml?.multiclass ? (
+              <>
+                ML: {(() => {
+                  const classLabels = {
+                    'STRONG_UP': '🚀 Strong Buy',
+                    'WEAK_UP': '📈 Buy',
+                    'SIDEWAYS': '➡️ Hold',
+                    'WEAK_DOWN': '📉 Sell',
+                    'STRONG_DOWN': '💥 Strong Sell'
+                  }
+                  return classLabels[ml.multiclass.prediction as keyof typeof classLabels] || ml.multiclass.prediction
+                })()}
+              </>
+            ) : (
+              <>ML: {ml?.p==null? '--' : `${Math.round((ml.p||0)*100)}%`}</>
+            )}
+          </span>
 
           <span style={chip} title={`DATA_BASE endpoint`}>Endpoint: {DATA_BASE}</span>
           <span style={chip} title="Data provider for this ticker">Source: {(((data as any)?.technicals)?.provider) || '--'}</span>

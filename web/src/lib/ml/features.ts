@@ -53,12 +53,14 @@ export function toBaseFeatures(x: any): BaseFeatures {
     f.above_all_smas = (price > sma20 && price > sma50 && price > sma200) ? 1 : 0
   }
 
-  // Additional features (approximated from available data)
+  // Additional features for ensemble model
+  f.vol20_rising = 0 // Default neutral (would need volume history)
   f.vol_ratio = 1 // Default neutral value
   f.price_momentum_5d = 0 // Would need historical data
   f.price_momentum_10d = 0 // Would need historical data
-  f.bb_position = 0.5 // Default middle position
+  f.bb_position = 0.5 // Default middle position (between Bollinger Bands)
   f.volume_trend = 1 // Default neutral
+  f.rsi_momentum = 0 // Default neutral (would need RSI history)
 
   return f
 }

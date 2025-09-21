@@ -1,5 +1,6 @@
-import { loadLinearModelFromStorage, sigmoid } from '../../../../lib/ml/model'
+import { loadModelFromStorage, loadLinearModelFromStorage, sigmoid, isEnsembleModel, isLinearModel } from '../../../../lib/ml/model'
 import { toBaseFeatures, vectorForModel, dot, featureContributions } from '../../../../lib/ml/features'
+import { predictWithEnsemble, ensemblePredictionToLegacy } from '../../../../lib/ml/ensemble'
 
 export const runtime = 'nodejs'
 
@@ -84,7 +85,7 @@ export async function GET(req: Request) {
     let modelPath = requestedModelPath || DEFAULT_MODEL_POINTER
 
     try {
-      model = await loadLinearModelFromStorage(modelPath)
+      model = await loadModelFromStorage(modelPath)
     } catch (e: any) {
       // If default latest.json fails, try to find the latest model automatically
       if (!requestedModelPath) {
@@ -93,7 +94,7 @@ export async function GET(req: Request) {
           if (autoModelPath !== modelPath) {
             console.log(`Trying auto-discovered model: ${autoModelPath}`)
             modelPath = autoModelPath
-            model = await loadLinearModelFromStorage(modelPath)
+            model = await loadModelFromStorage(modelPath)
           }
         } catch (e2: any) {
           modelError = `${e?.message || String(e)} | Auto-discovery failed: ${e2?.message || String(e2)}`
@@ -120,15 +121,42 @@ export async function GET(req: Request) {
         const p = typeof x?.score === 'number' ? Math.max(0, Math.min(1, x.score / 100)) : null
         return { ticker: t, p, model: 'heuristic_score/100' }
       }
+
       const base = toBaseFeatures(x)
-      const vec = vectorForModel(model, base)
-      const z = dot(model, vec)
-      const p = sigmoid(z)
-      const contribs = featureContributions(model, base)
-        .sort((a,b)=>Math.abs(b.contrib)-Math.abs(a.contrib))
-        .slice(0, 5)
-        .map(c=>({ key: c.key, contrib: c.contrib, weight: c.weight, mean: c.mean, std: c.std }))
-      return { ticker: t, p, contribs }
+
+      // Handle ensemble models
+      if (isEnsembleModel(model)) {
+        const ensemblePred = predictWithEnsemble(model, base)
+        const legacy = ensemblePredictionToLegacy(ensemblePred)
+
+        return {
+          ticker: t,
+          p: legacy.p,
+          contribs: legacy.contribs,
+          // Additional ensemble-specific data
+          multiclass: {
+            prediction: ensemblePred.prediction.class,
+            confidence: ensemblePred.prediction.confidence,
+            probabilities: ensemblePred.prediction.probabilities
+          },
+          model_info: ensemblePred.model_info
+        }
+      }
+
+      // Handle linear models (backward compatibility)
+      if (isLinearModel(model)) {
+        const vec = vectorForModel(model, base)
+        const z = dot(model, vec)
+        const p = sigmoid(z)
+        const contribs = featureContributions(model, base)
+          .sort((a,b)=>Math.abs(b.contrib)-Math.abs(a.contrib))
+          .slice(0, 5)
+          .map(c=>({ key: c.key, contrib: c.contrib, weight: c.weight, mean: c.mean, std: c.std }))
+        return { ticker: t, p, contribs }
+      }
+
+      // Fallback
+      return { ticker: t, p: null, note: 'unsupported_model_type' }
     })
 
     const response = {

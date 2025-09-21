@@ -1,4 +1,4 @@
-import { loadLinearModelFromStorage } from '../../../../lib/ml/model'
+import { loadModelFromStorage, loadLinearModelFromStorage } from '../../../../lib/ml/model'
 
 export const runtime = 'nodejs'
 
@@ -56,14 +56,14 @@ export async function GET(req: Request) {
 
     let model
     try {
-      model = await loadLinearModelFromStorage(modelPath)
+      model = await loadModelFromStorage(modelPath)
     } catch (e: any) {
       // If default latest.json fails, try to find the latest model automatically
       if (!requestedModelPath) {
         const autoModelPath = await findLatestModel()
         if (autoModelPath !== modelPath) {
           modelPath = autoModelPath
-          model = await loadLinearModelFromStorage(modelPath)
+          model = await loadModelFromStorage(modelPath)
         }
       } else {
         throw e

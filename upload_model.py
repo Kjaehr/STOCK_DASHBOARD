@@ -36,19 +36,47 @@ def upload_to_supabase(file_path: str, storage_path: str):
             return False
 
 def main():
-    # Upload the model file
-    model_file = "ml_out/model_v1_202509201843_yf.json"
-    if Path(model_file).exists():
-        upload_to_supabase(model_file, "ml/models/model_v1_202509201843_yf.json")
+    # Find the latest ensemble model
+    ml_out_dir = Path("ml_out")
+    ensemble_models = list(ml_out_dir.glob("model_v3_*_ensemble.json"))
+
+    if ensemble_models:
+        # Sort by filename (timestamp) and get the latest
+        latest_model = sorted(ensemble_models)[-1]
+        model_name = latest_model.name
+        storage_path = f"ml/models/{model_name}"
+
+        print(f"Uploading latest ensemble model: {latest_model}")
+        if upload_to_supabase(str(latest_model), storage_path):
+            # Update latest.json to point to this model
+            latest_content = {
+                "path": storage_path,
+                "version": model_name.replace('.json', '')
+            }
+            latest_file = ml_out_dir / "latest.json"
+            with open(latest_file, 'w') as f:
+                json.dump(latest_content, f)
+
+            # Upload the updated latest.json
+            upload_to_supabase(str(latest_file), "ml/models/latest.json")
+        else:
+            print("Failed to upload model")
     else:
-        print(f"Model file {model_file} not found")
-    
-    # Upload the latest pointer
-    latest_file = "ml_out/latest.json"
-    if Path(latest_file).exists():
-        upload_to_supabase(latest_file, "ml/models/latest.json")
-    else:
-        print(f"Latest file {latest_file} not found")
+        print("No ensemble models found in ml_out/")
+
+        # Fallback to v1 model
+        model_file = "ml_out/model_v1_202509201843_yf.json"
+        if Path(model_file).exists():
+            upload_to_supabase(model_file, "ml/models/model_v1_202509201843_yf.json")
+        else:
+            print(f"Model file {model_file} not found")
+
+        # Upload the latest pointer
+        latest_file = "ml_out/latest.json"
+        if Path(latest_file).exists():
+            upload_to_supabase(latest_file, "ml/models/latest.json")
+        else:
+            print(f"Latest file {latest_file} not found")
 
 if __name__ == "__main__":
     main()

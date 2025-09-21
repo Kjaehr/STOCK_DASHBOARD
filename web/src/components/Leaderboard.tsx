@@ -78,7 +78,20 @@ export default function Leaderboard() {
   const [onlyPriced, setOnlyPriced] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [usingCache, setUsingCache] = useState(false)
-  const [ml, setMl] = useState<Record<string, { p: number|null; contribs?: Array<{ key: string; contrib: number }> }>>({})
+  const [ml, setMl] = useState<Record<string, {
+    p: number|null;
+    contribs?: Array<{ key: string; contrib: number }>;
+    multiclass?: {
+      prediction: string;
+      confidence: number;
+      probabilities: Record<string, number>;
+    };
+    model_info?: {
+      version: string;
+      model_type: string;
+      ensemble_models?: string[];
+    };
+  }>>({})
 
   // Routing/URL state
   const router = useRouter()
@@ -274,14 +287,48 @@ export default function Leaderboard() {
       try {
         const r = await fetch(url, { cache: 'no-store' })
         if (!r.ok) return null
-        return (await r.json()) as { preds: Array<{ ticker: string; p: number|null; contribs?: Array<{ key:string; contrib:number }> }> }
+        return (await r.json()) as { preds: Array<{
+          ticker: string;
+          p: number|null;
+          contribs?: Array<{ key:string; contrib:number }>;
+          multiclass?: {
+            prediction: string;
+            confidence: number;
+            probabilities: Record<string, number>;
+          };
+          model_info?: {
+            version: string;
+            model_type: string;
+            ensemble_models?: string[];
+          };
+        }> }
       } catch { return null }
     })
     const results = await Promise.allSettled(calls)
-    const map: Record<string, { p: number|null; contribs?: Array<{ key:string; contrib:number }> }> = {}
+    const map: Record<string, {
+      p: number|null;
+      contribs?: Array<{ key:string; contrib:number }>;
+      multiclass?: {
+        prediction: string;
+        confidence: number;
+        probabilities: Record<string, number>;
+      };
+      model_info?: {
+        version: string;
+        model_type: string;
+        ensemble_models?: string[];
+      };
+    }> = {}
     results.forEach(res => {
       if (res.status === 'fulfilled' && res.value && Array.isArray(res.value.preds)) {
-        res.value.preds.forEach(pr => { if (pr?.ticker) map[pr.ticker] = { p: pr.p, contribs: pr.contribs } })
+        res.value.preds.forEach(pr => {
+          if (pr?.ticker) map[pr.ticker] = {
+            p: pr.p,
+            contribs: pr.contribs,
+            multiclass: pr.multiclass,
+            model_info: pr.model_info
+          }
+        })
       }
     })
     setMl(prev => ({ ...prev, ...map }))
@@ -520,8 +567,51 @@ export default function Leaderboard() {
                     {(() => {
                       const rec = ml[row.ticker]
                       const p = rec?.p
-                      const pct = (p == null || Number.isNaN(p)) ? '--' : `${Math.round(p*100)}%`
+                      const multiclass = rec?.multiclass
                       const contribs = rec?.contribs || []
+
+                      // Show ensemble prediction if available
+                      if (multiclass) {
+                        const classLabels = {
+                          'STRONG_UP': '🚀 Strong Buy',
+                          'WEAK_UP': '📈 Buy',
+                          'SIDEWAYS': '➡️ Hold',
+                          'WEAK_DOWN': '📉 Sell',
+                          'STRONG_DOWN': '💥 Strong Sell'
+                        }
+                        const label = classLabels[multiclass.prediction as keyof typeof classLabels] || multiclass.prediction
+                        const confidence = `${(multiclass.confidence * 100).toFixed(0)}%`
+                        const tips = contribs.length ? contribs.slice(0,3).map(c=>`${c.key}: ${c.contrib>=0?'+':''}${c.contrib.toFixed(2)}`).join(', ') : ''
+                        const probTips = Object.entries(multiclass.probabilities || {})
+                          .sort(([,a], [,b]) => (b as number) - (a as number))
+                          .slice(0, 3)
+                          .map(([cls, prob]) => `${cls}: ${((prob as number) * 100).toFixed(0)}%`)
+                          .join(', ')
+
+                        return (
+                          <Tooltip.Root>
+                            <Tooltip.Trigger asChild>
+                              <div className="text-xs">
+                                <div className="font-medium">{label}</div>
+                                <div className="text-gray-500">{confidence}</div>
+                              </div>
+                            </Tooltip.Trigger>
+                            <Tooltip.Portal>
+                              <Tooltip.Content side="top" sideOffset={6} className="z-50 rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md max-w-[300px]">
+                                <div className="space-y-1">
+                                  <div><strong>Ensemble Model v3</strong></div>
+                                  <div>Probabilities: {probTips}</div>
+                                  {tips && <div>Top features: {tips}</div>}
+                                </div>
+                                <Tooltip.Arrow className="fill-border" />
+                              </Tooltip.Content>
+                            </Tooltip.Portal>
+                          </Tooltip.Root>
+                        )
+                      }
+
+                      // Fallback to legacy binary prediction
+                      const pct = (p == null || Number.isNaN(p)) ? '--' : `${Math.round(p*100)}%`
                       const tips = contribs.length ? contribs.slice(0,3).map(c=>`${c.key}: ${c.contrib>=0?'+':''}${c.contrib.toFixed(2)}`).join(', ') : ''
                       return (
                         <Tooltip.Root>
