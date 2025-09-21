@@ -754,6 +754,22 @@ def main():
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
         model_file = out_dir / f"model_{args.version}_{timestamp}_ensemble.json"
 
+        # Convert numpy types to native Python types for JSON serialization
+        def convert_numpy_types(obj):
+            """Recursively convert numpy types to native Python types"""
+            if isinstance(obj, dict):
+                return {k: convert_numpy_types(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(v) for v in obj]
+            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return obj
+
         # Prepare model metadata with real performance metrics
         model_metadata = {
             'version': args.version,
@@ -776,10 +792,10 @@ def main():
                 'test_samples': int(X.shape[0] * 0.2)
             },
             'performance': {
-                'train': results['train_metrics'],
-                'test': results['test_metrics']
+                'train': convert_numpy_types(results['train_metrics']),
+                'test': convert_numpy_types(results['test_metrics'])
             },
-            'feature_importance': results.get('feature_importance', {}),
+            'feature_importance': convert_numpy_types(results.get('feature_importance', {})),
             'model_info': {
                 'ensemble_models': list(trainer.models.keys()),
                 'voting_type': 'soft',

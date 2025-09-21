@@ -1,0 +1,124 @@
+{
+  "version": "v3",
+  "model_type": "ensemble",
+  "label_type": "multiclass",
+  "parameters": {
+    "years": 1,
+    "horizon": 20,
+    "max_tickers": 2,
+    "test_size": 0.2
+  },
+  "features": [
+    "price_over_sma20",
+    "price_over_sma50",
+    "price_over_sma200",
+    "rsi_norm",
+    "atr_pct",
+    "atr_bucket_0",
+    "atr_bucket_1",
+    "atr_bucket_2",
+    "atr_bucket_3",
+    "atr_bucket_4",
+    "vol20_rising",
+    "price_gt_ma20",
+    "rsi_oversold",
+    "rsi_overbought",
+    "rsi_momentum",
+    "sma_alignment",
+    "above_all_smas",
+    "vol_ratio",
+    "price_momentum_5d",
+    "price_momentum_10d",
+    "bb_position",
+    "volume_trend"
+  ],
+  "timestamp": "202509211836",
+  "dataset_info": {
+    "n_samples": 458,
+    "n_features": 22,
+    "n_tickers": 2,
+    "label_distribution": {
+      "SIDEWAYS": 29,
+      "STRONG_DOWN": 130,
+      "STRONG_UP": 161,
+      "WEAK_DOWN": 64,
+      "WEAK_UP": 74
+    },
+    "train_samples": 366,
+    "test_samples": 91
+  },
+  "performance": {
+    "train": {
+      "accuracy": 0.6311475409836066,
+      "precision": 0.6680530984769755,
+      "recall": 0.6311475409836066,
+      "f1_score": 0.6394176634977505,
+      "auc": 0.9041646911573091
+    },
+    "test": {
+      "accuracy": 0.21739130434782608,
+      "precision": 0.07522730087947481,
+      "recall": 0.21739130434782608,
+      "f1_score": 0.11057952362300189,
+      "auc": 0.6887956127273441
+    }
+  },
+  "feature_importance": {
+    "logistic_importance": {
+      "price_over_sma20": 0.3767186907276649,
+      "price_over_sma50": 0.9287218283519783,
+      "price_over_sma200": 0.039776681427047225,
+      "rsi_norm": 1.2787185339605374,
+      "atr_pct": 0.06097050991628275,
+      "atr_bucket_0": 0.4095622503362978,
+      "atr_bucket_1": 0.42836568512118584,
+      "atr_bucket_2": 0.8087345408524147,
+      "atr_bucket_3": 0.7521142913734917,
+      "atr_bucket_4": 0.7338079268306859,
+      "vol20_rising": 0.25597484880509297,
+      "price_gt_ma20": 0.9003802806747887,
+      "rsi_oversold": 1.1357742881452768,
+      "rsi_overbought": 0.4018303296052429,
+      "rsi_momentum": 0.9694565799742267,
+      "sma_alignment": 0.09580688751681947,
+      "above_all_smas": 0.2845978837927134,
+      "vol_ratio": 1.5260966966495544,
+      "price_momentum_5d": 0.4339137119652869,
+      "price_momentum_10d": 0.6869526790436027,
+      "bb_position": 1.4144808393340103,
+      "volume_trend": 0.05051318933628398
+    },
+    "random_forest_importance": {
+      "price_over_sma20": 0.07092651729773544,
+      "price_over_sma50": 0.13156689470400043,
+      "price_over_sma200": 0.08837643275953949,
+      "rsi_norm": 0.0660586538603243,
+      "atr_pct": 0.0923498126549408,
+      "atr_bucket_0": 0.009335331735087464,
+      "atr_bucket_1": 0.003401988985327561,
+      "atr_bucket_2": 0.011557861405286437,
+      "atr_bucket_3": 0.00641773950342657,
+      "atr_bucket_4": 0.002564491086837149,
+      "vol20_rising": 0.016742862394728428,
+      "price_gt_ma20": 0.01836325664835507,
+      "rsi_oversold": 0.003019190457836031,
+      "rsi_overbought": 0.003381744346370007,
+      "rsi_momentum": 0.07763969349894892,
+      "sma_alignment": 0.0043016592505238805,
+      "above_all_smas": 0.0042872818079560185,
+      "vol_ratio": 0.06814879236096512,
+      "price_momentum_5d": 0.06333142893344527,
+      "price_momentum_10d": 0.10800953811655334,
+      "bb_position": 0.07314583162697061,
+      "volume_trend": 0.07707299656484155
+    }
+  },
+  "model_info": {
+    "ensemble_models": [
+      "logistic",
+      "random_forest"
+    ],
+    "voting_type": "soft",
+    "scaling": "StandardScaler"
+  }
+}
