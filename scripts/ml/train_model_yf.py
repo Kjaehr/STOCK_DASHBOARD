@@ -54,8 +54,14 @@ FEATURE_ORDER = [
     'price_gt_ma20',
     'rsi_oversold',
     'rsi_overbought',
+    'rsi_momentum',
     'sma_alignment',
     'above_all_smas',
+    'vol_ratio',
+    'price_momentum_5d',
+    'price_momentum_10d',
+    'bb_position',
+    'volume_trend',
 ]
 
 
@@ -207,39 +213,93 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Momentum features
     out['rsi_oversold'] = (rsi_values < 30).astype(float)
     out['rsi_overbought'] = (rsi_values > 70).astype(float)
+    out['rsi_momentum'] = (rsi_values - rsi_values.shift(5)).fillna(0) / 100.0  # 5-day RSI change
 
     # Price position features
     out['sma_alignment'] = ((sma20 > sma50) & (sma50 > sma200)).astype(float)
     out['above_all_smas'] = ((df['Close'] > sma20) & (df['Close'] > sma50) & (df['Close'] > sma200)).astype(float)
 
+    # Volatility features
+    returns = df['Close'].pct_change().fillna(0)
+    vol_5d = returns.rolling(5).std().fillna(0) * (252**0.5)  # Annualized volatility
+    vol_20d = returns.rolling(20).std().fillna(0) * (252**0.5)
+    out['vol_ratio'] = (vol_5d / vol_20d.replace(0, 1)).fillna(1)  # Short vs long-term vol
+
+    # Price momentum
+    out['price_momentum_5d'] = (df['Close'] / df['Close'].shift(5) - 1).fillna(0)
+    out['price_momentum_10d'] = (df['Close'] / df['Close'].shift(10) - 1).fillna(0)
+
+    # Bollinger Bands position
+    bb_middle = sma20
+    bb_std = df['Close'].rolling(20).std()
+    bb_upper = bb_middle + (bb_std * 2)
+    bb_lower = bb_middle - (bb_std * 2)
+    out['bb_position'] = ((df['Close'] - bb_lower) / (bb_upper - bb_lower).replace(0, 1)).fillna(0.5)
+
+    # Volume-Price Trend (simplified)
+    out['volume_trend'] = (df['Volume'] / df['Volume'].rolling(20, min_periods=1).mean()).fillna(1)
+
     return out
 
 
 def label_future_path(df: pd.DataFrame, horizon: int, up: float, down: float) -> pd.Series:
-    # For each day, look ahead up to horizon days: if High reaches +up% before Low hits -down%, label=1 else 0
+    # Enhanced labeling: consider both direction and magnitude of moves
     highs = df['High'].values
     lows = df['Low'].values
     close = df['Close'].values
     n = len(df)
     y = np.zeros(n, dtype=np.int32)
+
     for i in range(n):
         entry = close[i]
         if not math.isfinite(entry) or entry <= 0:
             y[i] = 0
             continue
-        up_level = entry * (1.0 + up)
-        down_level = entry * (1.0 - down)
+
+        # Dynamic thresholds based on volatility
+        recent_returns = []
+        for k in range(max(0, i-10), i):
+            if k < n-1:
+                ret = abs(close[k+1] / close[k] - 1)
+                if math.isfinite(ret):
+                    recent_returns.append(ret)
+
+        avg_vol = np.mean(recent_returns) if recent_returns else 0.03
+        # Adjust thresholds: higher for volatile stocks, lower for stable ones
+        adj_up = max(0.02, min(0.15, up + avg_vol * 0.5))
+        adj_down = max(0.02, min(0.15, down + avg_vol * 0.5))
+
+        up_level = entry * (1.0 + adj_up)
+        down_level = entry * (1.0 - adj_down)
+
         hit = 0
+        max_gain = 0
+        max_loss = 0
+
         for j in range(1, horizon + 1):
             k = i + j
             if k >= n:
                 break
+
+            gain = (highs[k] - entry) / entry
+            loss = (entry - lows[k]) / entry
+            max_gain = max(max_gain, gain)
+            max_loss = max(max_loss, loss)
+
+            # Hit up target
             if highs[k] >= up_level:
                 hit = 1
                 break
             if lows[k] <= down_level:
                 hit = 0
                 break
+
+        # Additional quality filter: prefer moves with good risk/reward
+        if hit == 1 and max_gain > 0 and max_loss > 0:
+            risk_reward = max_gain / max_loss
+            if risk_reward < 1.5:  # Poor risk/reward
+                hit = 0
+
         y[i] = hit
     return pd.Series(y, index=df.index)
 

@@ -43,6 +43,8 @@ export function toBaseFeatures(x: any): BaseFeatures {
   if (rsi != null) {
     f.rsi_oversold = rsi < 30 ? 1 : 0
     f.rsi_overbought = rsi > 70 ? 1 : 0
+    // RSI momentum (5-day change) - approximate from current RSI
+    f.rsi_momentum = 0 // Will be 0 for now, could be enhanced with historical data
   }
 
   // Price position features
@@ -50,6 +52,13 @@ export function toBaseFeatures(x: any): BaseFeatures {
     f.sma_alignment = (sma20 > sma50 && sma50 > sma200) ? 1 : 0
     f.above_all_smas = (price > sma20 && price > sma50 && price > sma200) ? 1 : 0
   }
+
+  // Additional features (approximated from available data)
+  f.vol_ratio = 1 // Default neutral value
+  f.price_momentum_5d = 0 // Would need historical data
+  f.price_momentum_10d = 0 // Would need historical data
+  f.bb_position = 0.5 // Default middle position
+  f.volume_trend = 1 // Default neutral
 
   return f
 }
