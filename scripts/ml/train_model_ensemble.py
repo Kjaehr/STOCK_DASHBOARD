@@ -24,7 +24,7 @@ from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import classification_report, roc_auc_score, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -241,6 +241,7 @@ class EnsembleTrainer:
         self.models = {}
         self.ensemble = None
         self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
         self.feature_importance = {}
         
     def create_models(self) -> Dict[str, Any]:
@@ -406,14 +407,22 @@ class EnsembleTrainer:
         else:
             X_scaled = X
 
-        # Predictions
-        y_pred = model.predict(X_scaled)
+        # Predictions (model predicts encoded labels)
+        y_pred_encoded = model.predict(X_scaled)
         y_pred_proba = None
 
         try:
             y_pred_proba = model.predict_proba(X_scaled)
         except:
             pass
+
+        # Convert predictions back to original labels if needed
+        if hasattr(self, 'label_encoder') and hasattr(y[0], '__class__') and isinstance(y[0], str):
+            # y is original string labels, convert predictions back
+            y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
+        else:
+            # y is already encoded, use encoded predictions
+            y_pred = y_pred_encoded
 
         # Basic metrics
         accuracy = accuracy_score(y, y_pred)
@@ -469,22 +478,27 @@ class EnsembleTrainer:
         """Train ensemble and evaluate with train/test split"""
         from sklearn.model_selection import train_test_split
 
+        # Encode labels to numeric values for XGBoost compatibility
+        y_encoded = self.label_encoder.fit_transform(y)
+
         # Time-aware split (important for financial data)
         split_idx = int(len(X) * (1 - test_size))
         X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
+        y_train, y_test = y_encoded[:split_idx], y_encoded[split_idx:]
+        y_train_orig, y_test_orig = y[:split_idx], y[split_idx:]
 
         print(f"Training set: {len(X_train)} samples")
         print(f"Test set: {len(X_test)} samples")
+        print(f"Label classes: {list(self.label_encoder.classes_)}")
 
         # Train ensemble
         ensemble = self.train_ensemble(X_train, y_train)
 
-        # Evaluate on training set
-        train_metrics = self.evaluate_model(ensemble, X_train, y_train, "Training Set")
+        # Evaluate on training set (convert back to original labels for metrics)
+        train_metrics = self.evaluate_model(ensemble, X_train, y_train_orig, "Training Set")
 
-        # Evaluate on test set
-        test_metrics = self.evaluate_model(ensemble, X_test, y_test, "Test Set")
+        # Evaluate on test set (convert back to original labels for metrics)
+        test_metrics = self.evaluate_model(ensemble, X_test, y_test_orig, "Test Set")
 
         # Calculate feature importance
         feature_names = FEATURE_ORDER[:X.shape[1]]
@@ -495,7 +509,8 @@ class EnsembleTrainer:
             'train_metrics': train_metrics,
             'test_metrics': test_metrics,
             'feature_importance': importance,
-            'model': ensemble
+            'model': ensemble,
+            'label_encoder': self.label_encoder
         }
 
         return ensemble, results
