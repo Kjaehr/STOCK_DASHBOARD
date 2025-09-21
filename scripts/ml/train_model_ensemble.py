@@ -829,7 +829,17 @@ def main():
             print(f"\n🔍 Top 5 Most Important Features:")
             for model_name, importance in results['feature_importance'].items():
                 if isinstance(importance, dict):
-                    sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
+                    # Convert numpy arrays to scalars for sorting
+                    importance_scalars = {}
+                    for feat, imp in importance.items():
+                        if hasattr(imp, '__len__') and len(imp) > 1:
+                            # If it's an array, take the mean
+                            importance_scalars[feat] = float(np.mean(imp))
+                        else:
+                            # If it's a scalar or single-element array
+                            importance_scalars[feat] = float(imp)
+
+                    sorted_features = sorted(importance_scalars.items(), key=lambda x: x[1], reverse=True)[:5]
                     print(f"  {model_name}:")
                     for feat, imp in sorted_features:
                         print(f"    {feat}: {imp:.4f}")
