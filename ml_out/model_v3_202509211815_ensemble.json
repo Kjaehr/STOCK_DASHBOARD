@@ -1,0 +1,53 @@
+{
+  "version": "v3",
+  "model_type": "ensemble",
+  "label_type": "multiclass",
+  "parameters": {
+    "years": 1,
+    "horizon": 20,
+    "max_tickers": 2
+  },
+  "features": [
+    "price_over_sma20",
+    "price_over_sma50",
+    "price_over_sma200",
+    "rsi_norm",
+    "atr_pct",
+    "atr_bucket_0",
+    "atr_bucket_1",
+    "atr_bucket_2",
+    "atr_bucket_3",
+    "atr_bucket_4",
+    "vol20_rising",
+    "price_gt_ma20",
+    "rsi_oversold",
+    "rsi_overbought",
+    "rsi_momentum",
+    "sma_alignment",
+    "above_all_smas",
+    "vol_ratio",
+    "price_momentum_5d",
+    "price_momentum_10d",
+    "bb_position",
+    "volume_trend"
+  ],
+  "timestamp": "202509211815",
+  "dataset_info": {
+    "n_samples": 458,
+    "n_features": 22,
+    "n_tickers": 2,
+    "label_distribution": {
+      "SIDEWAYS": 29,
+      "STRONG_DOWN": 130,
+      "STRONG_UP": 161,
+      "WEAK_DOWN": 64,
+      "WEAK_UP": 74
+    }
+  },
+  "performance": {
+    "accuracy": 0.0,
+    "auc": 0.0,
+    "precision": 0.0,
+    "recall": 0.0
+  }
+}
