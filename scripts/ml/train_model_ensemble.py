@@ -244,30 +244,42 @@ class EnsembleTrainer:
         self.feature_importance = {}
         
     def create_models(self) -> Dict[str, Any]:
-        """Create individual models for ensemble"""
+        """Create individual models for ensemble with better regularization"""
         models = {
             'logistic': LogisticRegression(
-                random_state=42, 
-                max_iter=1000,
-                class_weight='balanced'
+                random_state=42,
+                max_iter=2000,
+                class_weight='balanced',
+                C=1.0,  # Regularization strength
+                penalty='l2',
+                solver='lbfgs'
             ),
             'random_forest': RandomForestClassifier(
-                n_estimators=100,
+                n_estimators=50,  # Reduced to prevent overfitting
                 random_state=42,
                 class_weight='balanced',
+                max_depth=8,  # Limit depth
+                min_samples_split=10,  # Require more samples to split
+                min_samples_leaf=5,   # Require more samples in leaf
+                max_features='sqrt',  # Use subset of features
                 n_jobs=-1
             )
         }
-        
+
         if HAS_XGBOOST:
             models['xgboost'] = xgb.XGBClassifier(
                 random_state=42,
-                n_estimators=100,
-                learning_rate=0.1,
-                max_depth=6,
+                n_estimators=50,  # Reduced
+                learning_rate=0.05,  # Lower learning rate
+                max_depth=4,  # Shallower trees
+                min_child_weight=3,  # More regularization
+                subsample=0.8,  # Use subset of samples
+                colsample_bytree=0.8,  # Use subset of features
+                reg_alpha=0.1,  # L1 regularization
+                reg_lambda=1.0,  # L2 regularization
                 eval_metric='logloss'
             )
-        
+
         return models
     
     def hyperparameter_tuning(self, X: np.ndarray, y: np.ndarray, 
@@ -278,21 +290,25 @@ class EnsembleTrainer:
         param_grids = {
             'logistic': {
                 'C': [0.1, 1.0, 10.0],
-                'penalty': ['l1', 'l2'],
-                'solver': ['liblinear']
+                'penalty': ['l2'],
+                'solver': ['lbfgs']
             },
             'random_forest': {
-                'n_estimators': [50, 100, 200],
-                'max_depth': [5, 10, None],
-                'min_samples_split': [2, 5, 10]
+                'n_estimators': [30, 50, 100],
+                'max_depth': [6, 8, 10],
+                'min_samples_split': [5, 10, 15],
+                'min_samples_leaf': [3, 5, 7]
             }
         }
         
         if HAS_XGBOOST and model_name == 'xgboost':
             param_grids['xgboost'] = {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.05, 0.1, 0.2],
-                'max_depth': [3, 6, 9]
+                'n_estimators': [30, 50, 100],
+                'learning_rate': [0.03, 0.05, 0.1],
+                'max_depth': [3, 4, 6],
+                'min_child_weight': [1, 3, 5],
+                'subsample': [0.8, 0.9],
+                'colsample_bytree': [0.8, 0.9]
             }
         
         if model_name in param_grids:
@@ -309,29 +325,43 @@ class EnsembleTrainer:
     def train_ensemble(self, X: np.ndarray, y: np.ndarray) -> VotingClassifier:
         """Train ensemble with hyperparameter tuning"""
         print("Training individual models...")
-        
+        print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
+
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
-        
+
         # Create and tune individual models
         base_models = self.create_models()
         tuned_models = []
-        
+
         for name, model in base_models.items():
-            print(f"Tuning {name}...")
-            tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model)
-            tuned_models.append((name, tuned_model))
-            self.models[name] = tuned_model
-        
+            print(f"Training and tuning {name}...")
+            try:
+                tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model)
+                tuned_models.append((name, tuned_model))
+                self.models[name] = tuned_model
+                print(f"✅ {name} trained successfully")
+            except Exception as e:
+                print(f"❌ {name} training failed: {e}")
+                # Add untrained model as fallback
+                model.fit(X_scaled, y)
+                tuned_models.append((name, model))
+                self.models[name] = model
+                print(f"⚠️ {name} using default parameters")
+
+        if not tuned_models:
+            raise RuntimeError("No models could be trained")
+
         # Create ensemble
         ensemble = VotingClassifier(
             estimators=tuned_models,
             voting='soft'  # Use probabilities
         )
-        
+
         print("Training ensemble...")
         ensemble.fit(X_scaled, y)
-        
+        print("✅ Ensemble training completed")
+
         return ensemble
     
     def calculate_feature_importance(self, X: np.ndarray, feature_names: List[str]):
@@ -364,6 +394,112 @@ class EnsembleTrainer:
         self.feature_importance = importance_dict
         return importance_dict
 
+    def evaluate_model(self, model: Any, X: np.ndarray, y: np.ndarray,
+                      model_name: str = "model") -> Dict[str, float]:
+        """Evaluate model performance with comprehensive metrics"""
+        from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                                   f1_score, classification_report, confusion_matrix)
+
+        # Scale features if needed
+        if hasattr(self, 'scaler') and self.scaler is not None:
+            X_scaled = self.scaler.transform(X)
+        else:
+            X_scaled = X
+
+        # Predictions
+        y_pred = model.predict(X_scaled)
+        y_pred_proba = None
+
+        try:
+            y_pred_proba = model.predict_proba(X_scaled)
+        except:
+            pass
+
+        # Basic metrics
+        accuracy = accuracy_score(y, y_pred)
+
+        # Handle multiclass metrics
+        avg_method = 'weighted' if len(np.unique(y)) > 2 else 'binary'
+        precision = precision_score(y, y_pred, average=avg_method, zero_division=0)
+        recall = recall_score(y, y_pred, average=avg_method, zero_division=0)
+        f1 = f1_score(y, y_pred, average=avg_method, zero_division=0)
+
+        metrics = {
+            'accuracy': float(accuracy),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1_score': float(f1)
+        }
+
+        # AUC for multiclass (if probabilities available)
+        if y_pred_proba is not None:
+            try:
+                from sklearn.metrics import roc_auc_score
+                if len(np.unique(y)) == 2:
+                    auc = roc_auc_score(y, y_pred_proba[:, 1])
+                else:
+                    auc = roc_auc_score(y, y_pred_proba, multi_class='ovr', average='weighted')
+                metrics['auc'] = float(auc)
+            except Exception as e:
+                print(f"Could not calculate AUC: {e}")
+                metrics['auc'] = 0.0
+        else:
+            metrics['auc'] = 0.0
+
+        # Print detailed results
+        print(f"\n📊 {model_name} Performance:")
+        print(f"  Accuracy:  {accuracy:.4f}")
+        print(f"  Precision: {precision:.4f}")
+        print(f"  Recall:    {recall:.4f}")
+        print(f"  F1 Score:  {f1:.4f}")
+        print(f"  AUC:       {metrics['auc']:.4f}")
+
+        # Classification report
+        print(f"\n📋 {model_name} Classification Report:")
+        try:
+            report = classification_report(y, y_pred, zero_division=0)
+            print(report)
+        except Exception as e:
+            print(f"Could not generate classification report: {e}")
+
+        return metrics
+
+    def train_and_evaluate(self, X: np.ndarray, y: np.ndarray,
+                          test_size: float = 0.2) -> Tuple[Any, Dict[str, Any]]:
+        """Train ensemble and evaluate with train/test split"""
+        from sklearn.model_selection import train_test_split
+
+        # Time-aware split (important for financial data)
+        split_idx = int(len(X) * (1 - test_size))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+
+        print(f"Training set: {len(X_train)} samples")
+        print(f"Test set: {len(X_test)} samples")
+
+        # Train ensemble
+        ensemble = self.train_ensemble(X_train, y_train)
+
+        # Evaluate on training set
+        train_metrics = self.evaluate_model(ensemble, X_train, y_train, "Training Set")
+
+        # Evaluate on test set
+        test_metrics = self.evaluate_model(ensemble, X_test, y_test, "Test Set")
+
+        # Calculate feature importance
+        feature_names = FEATURE_ORDER[:X.shape[1]]
+        importance = self.calculate_feature_importance(X_train, feature_names)
+
+        # Combine results
+        results = {
+            'train_metrics': train_metrics,
+            'test_metrics': test_metrics,
+            'feature_importance': importance,
+            'model': ensemble
+        }
+
+        return ensemble, results
+
 def load_tickers_from_file(max_tickers: int = 30) -> List[str]:
     """Load tickers from scripts/tickers.txt"""
     tickers_file = REPO_ROOT / 'scripts' / 'tickers.txt'
@@ -380,7 +516,7 @@ def load_tickers_from_file(max_tickers: int = 30) -> List[str]:
     return tickers[:max_tickers]
 
 def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute basic technical features from OHLCV data"""
+    """Compute basic technical features from OHLCV data with improved stability"""
     df = df.copy()
 
     # SMAs
@@ -388,16 +524,17 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df['sma50'] = df['Close'].rolling(window=50).mean()
     df['sma200'] = df['Close'].rolling(window=200).mean()
 
-    # Price ratios
-    df['price_over_sma20'] = df['Close'] / df['sma20']
-    df['price_over_sma50'] = df['Close'] / df['sma50']
-    df['price_over_sma200'] = df['Close'] / df['sma200']
+    # Price ratios (with clipping to prevent extreme values)
+    df['price_over_sma20'] = np.clip(df['Close'] / df['sma20'], 0.5, 2.0)
+    df['price_over_sma50'] = np.clip(df['Close'] / df['sma50'], 0.5, 2.0)
+    df['price_over_sma200'] = np.clip(df['Close'] / df['sma200'], 0.5, 2.0)
 
     # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
+    # Add small epsilon to prevent division by zero
+    rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
     df['rsi_norm'] = df['rsi'] / 100.0
 
@@ -407,44 +544,60 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     low_close = np.abs(df['Low'] - df['Close'].shift())
     true_range = np.maximum(high_low, np.maximum(high_close, low_close))
     df['atr'] = true_range.rolling(window=14).mean()
-    df['atr_pct'] = df['atr'] / df['Close']
+    df['atr_pct'] = np.clip(df['atr'] / df['Close'], 0, 0.5)  # Cap at 50%
 
-    # ATR buckets
-    atr_quantiles = df['atr_pct'].quantile([0.2, 0.4, 0.6, 0.8])
-    df['atr_bucket_0'] = (df['atr_pct'] <= atr_quantiles.iloc[0]).astype(int)
-    df['atr_bucket_1'] = ((df['atr_pct'] > atr_quantiles.iloc[0]) &
-                         (df['atr_pct'] <= atr_quantiles.iloc[1])).astype(int)
-    df['atr_bucket_2'] = ((df['atr_pct'] > atr_quantiles.iloc[1]) &
-                         (df['atr_pct'] <= atr_quantiles.iloc[2])).astype(int)
-    df['atr_bucket_3'] = ((df['atr_pct'] > atr_quantiles.iloc[2]) &
-                         (df['atr_pct'] <= atr_quantiles.iloc[3])).astype(int)
-    df['atr_bucket_4'] = (df['atr_pct'] > atr_quantiles.iloc[3]).astype(int)
+    # ATR buckets (more stable quantiles)
+    atr_pct_clean = df['atr_pct'].dropna()
+    if len(atr_pct_clean) > 0:
+        atr_quantiles = atr_pct_clean.quantile([0.2, 0.4, 0.6, 0.8])
+        df['atr_bucket_0'] = (df['atr_pct'] <= atr_quantiles.iloc[0]).astype(int)
+        df['atr_bucket_1'] = ((df['atr_pct'] > atr_quantiles.iloc[0]) &
+                             (df['atr_pct'] <= atr_quantiles.iloc[1])).astype(int)
+        df['atr_bucket_2'] = ((df['atr_pct'] > atr_quantiles.iloc[1]) &
+                             (df['atr_pct'] <= atr_quantiles.iloc[2])).astype(int)
+        df['atr_bucket_3'] = ((df['atr_pct'] > atr_quantiles.iloc[2]) &
+                             (df['atr_pct'] <= atr_quantiles.iloc[3])).astype(int)
+        df['atr_bucket_4'] = (df['atr_pct'] > atr_quantiles.iloc[3]).astype(int)
+    else:
+        # Fallback if no valid data
+        for i in range(5):
+            df[f'atr_bucket_{i}'] = 0
 
-    # Additional features
-    df['vol20_rising'] = (df['Volume'].rolling(20).mean() >
-                         df['Volume'].rolling(20).mean().shift(5)).astype(int)
+    # Additional features (with stability improvements)
+    vol_ma20 = df['Volume'].rolling(20).mean()
+    vol_ma20_lag = vol_ma20.shift(5)
+    df['vol20_rising'] = (vol_ma20 > vol_ma20_lag).astype(int)
+
     df['price_gt_ma20'] = (df['Close'] > df['sma20']).astype(int)
     df['rsi_oversold'] = (df['rsi'] < 30).astype(int)
     df['rsi_overbought'] = (df['rsi'] > 70).astype(int)
-    df['rsi_momentum'] = df['rsi'].diff(5)
+    df['rsi_momentum'] = np.clip(df['rsi'].diff(5), -50, 50)  # Clip extreme values
+
     df['sma_alignment'] = ((df['sma20'] > df['sma50']) &
                           (df['sma50'] > df['sma200'])).astype(int)
     df['above_all_smas'] = ((df['Close'] > df['sma20']) &
                            (df['Close'] > df['sma50']) &
                            (df['Close'] > df['sma200'])).astype(int)
-    df['vol_ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
-    df['price_momentum_5d'] = df['Close'].pct_change(5)
-    df['price_momentum_10d'] = df['Close'].pct_change(10)
 
-    # Bollinger Bands position
+    # Volume ratio (with clipping)
+    vol_ratio_raw = df['Volume'] / (df['Volume'].rolling(20).mean() + 1e-8)
+    df['vol_ratio'] = np.clip(vol_ratio_raw, 0.1, 10.0)
+
+    # Price momentum (with clipping)
+    df['price_momentum_5d'] = np.clip(df['Close'].pct_change(5), -0.5, 0.5)
+    df['price_momentum_10d'] = np.clip(df['Close'].pct_change(10), -0.5, 0.5)
+
+    # Bollinger Bands position (with stability)
     bb_middle = df['Close'].rolling(20).mean()
     bb_std = df['Close'].rolling(20).std()
     bb_upper = bb_middle + (bb_std * 2)
     bb_lower = bb_middle - (bb_std * 2)
-    df['bb_position'] = (df['Close'] - bb_lower) / (bb_upper - bb_lower)
+    bb_width = bb_upper - bb_lower
+    df['bb_position'] = np.clip((df['Close'] - bb_lower) / (bb_width + 1e-8), 0, 1)
 
-    # Volume trend
-    df['volume_trend'] = df['Volume'].rolling(10).mean() / df['Volume'].rolling(30).mean()
+    # Volume trend (with stability)
+    vol_trend_raw = df['Volume'].rolling(10).mean() / (df['Volume'].rolling(30).mean() + 1e-8)
+    df['volume_trend'] = np.clip(vol_trend_raw, 0.1, 5.0)
 
     return df
 
@@ -567,18 +720,26 @@ def main():
         X, y = build_dataset(tickers, args.years, args.horizon, args.label_type)
         print(f"Dataset built: {X.shape[0]} samples, {X.shape[1]} features")
 
-        # For now, create a simple model metadata (actual training to be implemented)
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
-        model_file = out_dir / f"model_{args.version}_{timestamp}_ensemble.json"
-
         # Calculate basic stats
         if args.label_type == 'multiclass':
             unique_labels, counts = np.unique(y, return_counts=True)
             label_dist = dict(zip(unique_labels, counts.tolist()))
+            print(f"Label distribution: {label_dist}")
         else:
             label_dist = {"mean": float(np.mean(y)), "std": float(np.std(y))}
 
-        # Save model metadata
+        # Initialize trainer
+        trainer = EnsembleTrainer(args.model_type)
+
+        # Train and evaluate model
+        print(f"\n🚀 Starting {args.model_type} training...")
+        model, results = trainer.train_and_evaluate(X, y, test_size=0.2)
+
+        # Create model artifact
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
+        model_file = out_dir / f"model_{args.version}_{timestamp}_ensemble.json"
+
+        # Prepare model metadata with real performance metrics
         model_metadata = {
             'version': args.version,
             'model_type': args.model_type,
@@ -586,24 +747,32 @@ def main():
             'parameters': {
                 'years': args.years,
                 'horizon': args.horizon,
-                'max_tickers': args.max_tickers
+                'max_tickers': args.max_tickers,
+                'test_size': 0.2
             },
-            'features': FEATURE_ORDER[:22],  # Current features only
+            'features': FEATURE_ORDER[:X.shape[1]],
             'timestamp': timestamp,
             'dataset_info': {
                 'n_samples': int(X.shape[0]),
                 'n_features': int(X.shape[1]),
                 'n_tickers': len(tickers),
-                'label_distribution': label_dist
+                'label_distribution': label_dist,
+                'train_samples': int(X.shape[0] * 0.8),
+                'test_samples': int(X.shape[0] * 0.2)
             },
             'performance': {
-                'accuracy': 0.0,  # Placeholder - implement actual training
-                'auc': 0.0,
-                'precision': 0.0,
-                'recall': 0.0
+                'train': results['train_metrics'],
+                'test': results['test_metrics']
+            },
+            'feature_importance': results.get('feature_importance', {}),
+            'model_info': {
+                'ensemble_models': list(trainer.models.keys()),
+                'voting_type': 'soft',
+                'scaling': 'StandardScaler'
             }
         }
 
+        # Save model metadata
         with open(model_file, 'w') as f:
             json.dump(model_metadata, f, indent=2)
 
@@ -617,12 +786,27 @@ def main():
         with open(latest_file, 'w') as f:
             json.dump(latest_data, f, indent=2)
 
-        print(f"✅ Model metadata saved to {model_file}")
-        print(f"Dataset: {X.shape[0]} samples from {len(tickers)} tickers")
-        print("🚀 Ready for actual model training implementation!")
+        # Print summary
+        print(f"\n🎉 Training completed successfully!")
+        print(f"📁 Model saved to: {model_file}")
+        print(f"📊 Test Accuracy: {results['test_metrics']['accuracy']:.4f}")
+        print(f"📊 Test AUC: {results['test_metrics']['auc']:.4f}")
+        print(f"📊 Test F1: {results['test_metrics']['f1_score']:.4f}")
+
+        # Show top features
+        if 'feature_importance' in results and results['feature_importance']:
+            print(f"\n🔍 Top 5 Most Important Features:")
+            for model_name, importance in results['feature_importance'].items():
+                if isinstance(importance, dict):
+                    sorted_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
+                    print(f"  {model_name}:")
+                    for feat, imp in sorted_features:
+                        print(f"    {feat}: {imp:.4f}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 if __name__ == '__main__':
