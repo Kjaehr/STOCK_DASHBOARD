@@ -1,0 +1,155 @@
+name: Train Ensemble ML Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Model version (e.g. v3)"
+        required: false
+        default: "v3"
+      model_type:
+        description: "Model type"
+        required: false
+        default: "ensemble"
+        type: choice
+        options:
+          - ensemble
+          - xgboost
+          - random_forest
+          - logistic
+      label_type:
+        description: "Label type"
+        required: false
+        default: "multiclass"
+        type: choice
+        options:
+          - binary
+          - multiclass
+          - regression
+      years:
+        description: "Years of historical data"
+        required: false
+        default: "3"
+      horizon:
+        description: "Prediction horizon (days)"
+        required: false
+        default: "20"
+      max_tickers:
+        description: "Max tickers for training"
+        required: false
+        default: "30"
+
+jobs:
+  train-ensemble:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: scripts/ml/requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install Python dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          # Install heavy ML libraries with wheels when possible
+          PIP_ONLY_BINARY: "numpy,pandas,scipy,scikit-learn,xgboost,lightgbm,torch"
+        run: |
+          python -m pip install --upgrade pip
+          # Install core dependencies first
+          pip install numpy pandas scikit-learn
+          # Install ML libraries
+          pip install xgboost lightgbm shap
+          # Install remaining dependencies
+          pip install --prefer-binary -r scripts/ml/requirements.txt || true
+          # Fallback for any failed installations
+          pip install vaderSentiment plotly seaborn optuna || true
+
+      - name: Train ensemble model
+        run: |
+          python scripts/ml/train_model_ensemble.py \
+            --out-dir ml_out \
+            --version "${{ github.event.inputs.version || 'v3' }}" \
+            --model-type "${{ github.event.inputs.model_type || 'ensemble' }}" \
+            --label-type "${{ github.event.inputs.label_type || 'multiclass' }}" \
+            --years "${{ github.event.inputs.years || '3' }}" \
+            --horizon "${{ github.event.inputs.horizon || '20' }}" \
+            --max-tickers "${{ github.event.inputs.max_tickers || '30' }}"
+
+      - name: List outputs
+        run: |
+          ls -la ml_out/
+          echo "Model files:"
+          find ml_out -name "*.json" -exec echo "File: {}" \; -exec head -20 {} \;
+
+      - name: Upload model to Supabase Storage
+        run: |
+          set -euo pipefail
+          MODEL_FILE=$(ls -1 ml_out/model_*.json | head -n1)
+          if [ -z "$MODEL_FILE" ]; then echo "Model file not found"; exit 1; fi
+          MODEL_BASENAME=$(basename "$MODEL_FILE")
+          DEST_PATH="ml/models/${MODEL_BASENAME}"
+          
+          echo "Uploading $MODEL_FILE to $DEST_PATH"
+          curl -sS -X POST \
+            "${SUPABASE_URL%/}/storage/v1/object/${SUPABASE_BUCKET}/${DEST_PATH}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE}" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE}" \
+            -H "x-upsert: true" \
+            --data-binary @"${MODEL_FILE}" \
+            -o /dev/null -w '%{http_code}' | tee /tmp/upcode
+          
+          code=$(cat /tmp/upcode)
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then 
+            echo "Upload failed with code: $code"
+            exit 1
+          fi
+          echo "Upload successful with code: $code"
+
+      - name: Upload latest pointer
+        run: |
+          set -euo pipefail
+          LATEST_FILE="ml_out/latest.json"
+          if [ ! -f "$LATEST_FILE" ]; then echo "latest.json missing"; exit 1; fi
+          
+          echo "Uploading latest.json"
+          curl -sS -X POST \
+            "${SUPABASE_URL%/}/storage/v1/object/${SUPABASE_BUCKET}/ml/models/latest.json" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE}" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE}" \
+            -H "x-upsert: true" \
+            --data-binary @"${LATEST_FILE}" \
+            -o /dev/null -w '%{http_code}' | tee /tmp/upcode
+          
+          code=$(cat /tmp/upcode)
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then 
+            echo "Latest upload failed with code: $code"
+            exit 1
+          fi
+          echo "Latest upload successful with code: $code"
+
+      - name: Summary
+        run: |
+          echo "🎉 Ensemble model training completed!"
+          echo "Model type: ${{ github.event.inputs.model_type || 'ensemble' }}"
+          echo "Label type: ${{ github.event.inputs.label_type || 'multiclass' }}"
+          echo "Version: ${{ github.event.inputs.version || 'v3' }}"
+          echo ""
+          echo "Next steps:"
+          echo "1. Check model performance in uploaded JSON"
+          echo "2. Test model in your application"
+          echo "3. Compare with previous model versions"
