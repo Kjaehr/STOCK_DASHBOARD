@@ -69,6 +69,11 @@ export async function GET(req: Request) {
         throw e
       }
     }
+
+    if (!model) {
+      throw new Error('No model could be loaded')
+    }
+
     const resp = {
       path: modelPath,
       version: model.version,
