@@ -28,26 +28,85 @@ async function fetchScreener(req: Request, tickers: string[]) {
 // default model pointer in Storage
 const DEFAULT_MODEL_POINTER = 'ml/models/latest.json'
 
+async function findLatestModel(): Promise<string> {
+  // Try to find the latest model by listing files and picking the newest timestamp
+  try {
+    const SUPABASE_URL = process.env.SUPABASE_URL!
+    const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET!
+    const SERVICE = (process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY) as string
+
+    // List all model files in the ml/models directory
+    const listUrl = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/list/${SUPABASE_BUCKET}`
+    const response = await fetch(listUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SERVICE}`,
+        'apikey': SERVICE,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prefix: 'ml/models/',
+        limit: 100
+      })
+    })
+
+    if (response.ok) {
+      const files = await response.json()
+      // Find model files (not latest.json) and sort by timestamp in filename
+      const modelFiles = files
+        .filter((f: any) => f.name && f.name.startsWith('model_v') && f.name.endsWith('.json'))
+        .sort((a: any, b: any) => b.name.localeCompare(a.name)) // Sort descending (newest first)
+
+      if (modelFiles.length > 0) {
+        return `ml/models/${modelFiles[0].name}`
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to find latest model automatically:', e)
+  }
+
+  // Fallback to latest.json pointer
+  return DEFAULT_MODEL_POINTER
+}
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
     const tickers = (url.searchParams.get('tickers') || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 10)
     if (!tickers.length) return json({ error: 'tickers required' }, 400)
 
-    const modelPath = (url.searchParams.get('model') || DEFAULT_MODEL_POINTER).trim()
+    const requestedModelPath = url.searchParams.get('model')
     const debug = url.searchParams.get('debug') === '1'
 
     // 1) Load model (cached in-memory across warm invocations)
     let model
     let modelError = null
+    let modelPath = requestedModelPath || DEFAULT_MODEL_POINTER
+
     try {
       model = await loadLinearModelFromStorage(modelPath)
     } catch (e: any) {
-      // Log the actual error for debugging
-      modelError = e?.message || String(e)
-      console.error('ML model load failed:', modelError)
-      // Fallback: no model available -> degrade to heuristic based on screener score
-      model = null
+      // If default latest.json fails, try to find the latest model automatically
+      if (!requestedModelPath) {
+        try {
+          const autoModelPath = await findLatestModel()
+          if (autoModelPath !== modelPath) {
+            console.log(`Trying auto-discovered model: ${autoModelPath}`)
+            modelPath = autoModelPath
+            model = await loadLinearModelFromStorage(modelPath)
+          }
+        } catch (e2: any) {
+          modelError = `${e?.message || String(e)} | Auto-discovery failed: ${e2?.message || String(e2)}`
+        }
+      }
+
+      if (!model) {
+        // Log the actual error for debugging
+        modelError = modelError || e?.message || String(e)
+        console.error('ML model load failed:', modelError)
+        // Fallback: no model available -> degrade to heuristic based on screener score
+        model = null
+      }
     }
 
     // 2) Fetch features from screener
