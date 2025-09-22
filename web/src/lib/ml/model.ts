@@ -61,6 +61,17 @@ function env(name: string, required = true): string | undefined {
 }
 
 export async function getStorageObject(path: string) {
+  // For local development, try to load from public folder first
+  if (path.startsWith('ml/models/') && process.env.NODE_ENV === 'development') {
+    try {
+      const localUrl = `http://localhost:3000/${path}`
+      const r = await fetch(localUrl, { cache: 'no-store' })
+      if (r.ok) return r
+    } catch (e) {
+      console.log('Local file not found, trying Supabase:', e)
+    }
+  }
+
   const SUPABASE_URL = env('SUPABASE_URL')!
   const SUPABASE_BUCKET = env('SUPABASE_BUCKET')!
   const SERVICE = (env('SUPABASE_SERVICE_ROLE', false) || env('SUPABASE_KEY', false)) as string | undefined

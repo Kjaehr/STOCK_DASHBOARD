@@ -1,4 +1,4 @@
-import { loadModelFromStorage, loadLinearModelFromStorage } from '../../../../lib/ml/model'
+import { loadModelFromStorage, loadLinearModelFromStorage, isEnsembleModel, isLinearModel } from '../../../../lib/ml/model'
 
 export const runtime = 'nodejs'
 
@@ -74,16 +74,32 @@ export async function GET(req: Request) {
       throw new Error('No model could be loaded')
     }
 
-    const resp = {
+    let resp: any = {
       path: modelPath,
       version: model.version,
       features: model.features,
-      intercept: model.intercept,
-      coef_count: Array.isArray(model.coef) ? model.coef.length : 0,
-      norm: {
-        mean_keys: Object.keys(model.norm?.mean || {}),
-        std_keys: Object.keys(model.norm?.std || {}),
-      },
+    }
+
+    if (isEnsembleModel(model)) {
+      resp = {
+        ...resp,
+        model_type: model.model_type,
+        label_type: model.label_type,
+        parameters: model.parameters,
+        performance: model.performance,
+        feature_importance: model.feature_importance,
+        model_info: model.model_info,
+      }
+    } else if (isLinearModel(model)) {
+      resp = {
+        ...resp,
+        intercept: model.intercept,
+        coef_count: Array.isArray(model.coef) ? model.coef.length : 0,
+        norm: {
+          mean_keys: Object.keys(model.norm?.mean || {}),
+          std_keys: Object.keys(model.norm?.std || {}),
+        },
+      }
     }
     return json(resp)
   } catch (e: any) {
