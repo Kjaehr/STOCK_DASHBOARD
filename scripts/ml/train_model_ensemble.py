@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, TYPE_CHECKING, cast, Literal
 import json
 import numpy as np
 import pandas as pd
@@ -20,26 +20,34 @@ import time
 import re
 from io import StringIO
 import os
+import numbers
 
 from urllib.parse import quote_plus
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier, StackingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+
 try:
     import joblib
     HAS_JOBLIB = True
 except Exception:
     HAS_JOBLIB = False
 
+mlflow = None
 try:
-    import mlflow
+    import mlflow  # type: ignore
     HAS_MLFLOW = True
 except Exception:
+    mlflow = None
     HAS_MLFLOW = False
+
+wandb = None
 try:
-    import wandb
+    import wandb  # type: ignore
     HAS_WANDB = True
 except Exception:
+    wandb = None
     HAS_WANDB = False
 
 from sklearn.metrics import classification_report, roc_auc_score, accuracy_score
@@ -48,25 +56,46 @@ from sklearn.utils.class_weight import compute_class_weight
 import warnings
 warnings.filterwarnings('ignore')
 
+xgb = None
 try:
-    import xgboost as xgb
+    import xgboost as xgb  # type: ignore
     HAS_XGBOOST = True
 except ImportError:
+    xgb = None
     HAS_XGBOOST = False
     print("Warning: XGBoost not installed. Install with: pip install xgboost")
 
+LGBMClassifier = None
 try:
-    import shap
+    from lightgbm import LGBMClassifier  # type: ignore
+    HAS_LIGHTGBM = True
+except ImportError:
+    LGBMClassifier = None
+    HAS_LIGHTGBM = False
+    print("Warning: LightGBM not installed. Install with: pip install lightgbm")
+# Backward-compat alias for requested flag name
+HAS_LGBM = HAS_LIGHTGBM
+
+shap = None
+try:
+    import shap  # type: ignore
     HAS_SHAP = True
 except ImportError:
+    shap = None
     HAS_SHAP = False
     print("Warning: SHAP not installed. Install with: pip install shap")
+optuna = None
 try:
-    import optuna
+    import optuna  # type: ignore
     HAS_OPTUNA = True
 except ImportError:
+    optuna = None
     HAS_OPTUNA = False
     print("Warning: Optuna not installed. Install with: pip install optuna")
+
+if TYPE_CHECKING:
+    from optuna.trial import Trial as OptunaTrial
+
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -236,7 +265,7 @@ def fetch_history(ticker: str, years: int) -> pd.DataFrame | None:
 class MultiClassLabeler:
     """Create multi-class labels instead of binary"""
 
-    def __init__(self, thresholds: Dict[str, float] = None):
+    def __init__(self, thresholds: Optional[Dict[str, float]] = None):
         self.thresholds = thresholds or {
             'strong_up': 0.10,    # >10%
             'weak_up': 0.02,      # 2-10%
@@ -248,15 +277,16 @@ class MultiClassLabeler:
     def create_labels(self, returns: pd.Series) -> pd.Series:
         """Convert returns to multi-class labels"""
         labels = pd.Series(index=returns.index, dtype='category')
+        returns_num = pd.to_numeric(returns, errors='coerce').astype('float64')
 
-        labels[returns >= self.thresholds['strong_up']] = 'STRONG_UP'
-        labels[(returns >= self.thresholds['weak_up']) &
-               (returns < self.thresholds['strong_up'])] = 'WEAK_UP'
-        labels[(returns >= -self.thresholds['sideways']) &
-               (returns < self.thresholds['weak_up'])] = 'SIDEWAYS'
-        labels[(returns >= -self.thresholds['weak_down']) &
-               (returns < -self.thresholds['sideways'])] = 'WEAK_DOWN'
-        labels[returns < -self.thresholds['weak_down']] = 'STRONG_DOWN'
+        labels[returns_num >= self.thresholds['strong_up']] = 'STRONG_UP'
+        labels[(returns_num >= self.thresholds['weak_up']) &
+               (returns_num < self.thresholds['strong_up'])] = 'WEAK_UP'
+        labels[(returns_num >= -self.thresholds['sideways']) &
+               (returns_num < self.thresholds['weak_up'])] = 'SIDEWAYS'
+        labels[(returns_num >= -self.thresholds['weak_down']) &
+               (returns_num < -self.thresholds['sideways'])] = 'WEAK_DOWN'
+        labels[returns_num < -self.thresholds['weak_down']] = 'STRONG_DOWN'
 
         return labels
 
@@ -271,6 +301,12 @@ class EnsembleTrainer:
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         self.feature_importance = {}
+        # Dynamically configurable attributes (set from main via argparse)
+        self.optuna_trials: Optional[int] = None
+        self.optuna_timeout: Optional[int] = None
+        self.stacking_cv_splits: int = 3
+        self.meta_C: float = 0.5
+
 
     def create_models(self) -> Dict[str, Any]:
         """Create individual models for ensemble with better regularization"""
@@ -296,6 +332,7 @@ class EnsembleTrainer:
         }
 
         if HAS_XGBOOST:
+            assert xgb is not None
             models['xgboost'] = xgb.XGBClassifier(
                 random_state=42,
                 n_estimators=50,  # Reduced
@@ -307,6 +344,21 @@ class EnsembleTrainer:
                 reg_alpha=0.1,  # L1 regularization
                 reg_lambda=1.0,  # L2 regularization
                 eval_metric='logloss'
+            )
+
+        if HAS_LIGHTGBM:
+            assert LGBMClassifier is not None
+            models['lgbm'] = LGBMClassifier(
+                random_state=42,
+                n_estimators=100,
+                learning_rate=0.05,
+                num_leaves=31,
+                feature_fraction=0.8,
+                bagging_fraction=0.8,
+                reg_alpha=0.0,
+                reg_lambda=1.0,
+                class_weight='balanced',
+                n_jobs=-1
             )
 
         return models
@@ -345,6 +397,17 @@ class EnsembleTrainer:
                 'subsample': [0.8, 0.9],
                 'colsample_bytree': [0.8, 0.9]
             }
+        if HAS_LIGHTGBM and model_name == 'lgbm':
+            param_grids['lgbm'] = {
+                'n_estimators': [100, 200, 400],
+                'learning_rate': [0.03, 0.05, 0.1],
+                'num_leaves': [15, 31, 63],
+                'feature_fraction': [0.6, 0.8, 0.9],
+                'bagging_fraction': [0.6, 0.8, 0.9],
+                'min_child_samples': [10, 20, 40],
+                'reg_lambda': [0.1, 1.0, 5.0],
+                'reg_alpha': [0.0, 0.1, 1.0]
+            }
         if model_name in param_grids:
             grid_search = GridSearchCV(model, param_grids[model_name],
                                        cv=tscv, scoring='roc_auc_ovr',
@@ -365,10 +428,17 @@ class EnsembleTrainer:
         tscv = TimeSeriesSplit(n_splits=3)
         n_trials = int(getattr(self, 'optuna_trials', 30))
         timeout = getattr(self, 'optuna_timeout', None)
+        assert optuna is not None
         try:
             pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1)
+            print("Optuna: Using MedianPruner (startup_trials=3, warmup_steps=1)")
         except Exception:
-            pruner = None
+            try:
+                pruner = optuna.pruners.SuccessiveHalvingPruner(min_resource=1, reduction_factor=3)
+                print("Optuna: Falling back to SuccessiveHalvingPruner")
+            except Exception:
+                pruner = None
+                print("Optuna: No pruner available; proceeding without pruning")
 
         def auc_score(estimator, X_val, y_val):
             try:
@@ -378,7 +448,7 @@ class EnsembleTrainer:
                 preds = estimator.predict(X_val)
                 return float(accuracy_score(y_val, preds))
 
-        def objective(trial: 'optuna.Trial') -> float:
+        def objective(trial: 'OptunaTrial') -> float:
             # Expanded search spaces
             if model_name == 'logistic':
                 C = trial.suggest_float('C', 1e-4, 1e3, log=True)
@@ -386,17 +456,24 @@ class EnsembleTrainer:
                     random_state=42, max_iter=2000, class_weight='balanced',
                     penalty='l2', solver='lbfgs', C=C)
             elif model_name == 'random_forest':
-                n_estimators = trial.suggest_int('n_estimators', 50, 400)
+                n_estimators = trial.suggest_int('n_estimators', 50, 200)
                 max_depth = trial.suggest_int('max_depth', 3, 20)
                 min_samples_split = trial.suggest_int('min_samples_split', 2, 50)
                 min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, 20)
-                max_features = trial.suggest_categorical('max_features', ['sqrt', 'log2', 0.6, 0.8, 1.0])
+                choice = trial.suggest_categorical('max_features_kind', ['sqrt', 'log2', 'float'])
+                max_features: float | Literal['sqrt', 'log2']
+                if choice == 'float':
+                    max_features = float(trial.suggest_float('max_features_float', 0.5, 1.0))
+                else:
+                    # Narrow type to accepted sklearn literals
+                    choice_lit: Literal['sqrt', 'log2'] = cast(Literal['sqrt', 'log2'], choice)
+                    max_features = choice_lit
                 model = RandomForestClassifier(
                     n_estimators=n_estimators, max_depth=max_depth,
                     min_samples_split=min_samples_split, min_samples_leaf=min_samples_leaf,
                     max_features=max_features, class_weight='balanced', random_state=42, n_jobs=-1)
             elif model_name == 'xgboost' and HAS_XGBOOST:
-                n_estimators = trial.suggest_int('n_estimators', 50, 600)
+                n_estimators = trial.suggest_int('n_estimators', 50, 300)
                 learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3, log=True)
                 max_depth = trial.suggest_int('max_depth', 3, 10)
                 min_child_weight = trial.suggest_int('min_child_weight', 1, 20)
@@ -405,16 +482,40 @@ class EnsembleTrainer:
                 gamma = trial.suggest_float('gamma', 0.0, 5.0)
                 reg_alpha = trial.suggest_float('reg_alpha', 1e-4, 10.0, log=True)
                 reg_lambda = trial.suggest_float('reg_lambda', 1e-3, 20.0, log=True)
+                assert xgb is not None
                 model = xgb.XGBClassifier(
                     random_state=42, n_estimators=n_estimators, learning_rate=learning_rate,
                     max_depth=max_depth, min_child_weight=min_child_weight,
                     subsample=subsample, colsample_bytree=colsample_bytree,
                     gamma=gamma, reg_alpha=reg_alpha, reg_lambda=reg_lambda,
                     eval_metric='logloss')
+            elif model_name == 'lgbm' and HAS_LIGHTGBM:
+                n_estimators = trial.suggest_int('n_estimators', 100, 400)
+                learning_rate = trial.suggest_float('learning_rate', 0.01, 0.2, log=True)
+                num_leaves = trial.suggest_int('num_leaves', 15, 63)
+                feature_fraction = trial.suggest_float('feature_fraction', 0.6, 0.9)
+                bagging_fraction = trial.suggest_float('bagging_fraction', 0.6, 0.9)
+                min_child_samples = trial.suggest_int('min_child_samples', 10, 50)
+                reg_alpha = trial.suggest_float('reg_alpha', 0.0, 5.0)
+                reg_lambda = trial.suggest_float('reg_lambda', 0.0, 10.0)
+                assert LGBMClassifier is not None
+                model = LGBMClassifier(
+                    random_state=42,
+                    n_estimators=n_estimators,
+                    learning_rate=learning_rate,
+                    num_leaves=num_leaves,
+                    feature_fraction=feature_fraction,
+                    bagging_fraction=bagging_fraction,
+                    min_child_samples=min_child_samples,
+                    reg_alpha=reg_alpha,
+                    reg_lambda=reg_lambda,
+                    class_weight='balanced',
+                    n_jobs=-1
+                )
             else:
                 model = base_model
 
-            # Cross-validated evaluation with early stopping for XGBoost and pruning
+            # Cross-validated evaluation with early stopping for XGBoost/LightGBM and pruning
             scores = []
             for fold_i, (train_idx, val_idx) in enumerate(tscv.split(X), start=1):
                 X_tr, X_val = X[train_idx], X[val_idx]
@@ -424,8 +525,22 @@ class EnsembleTrainer:
                         fit_kwargs = {'eval_set': [(X_val, y_val)], 'verbose': False, 'early_stopping_rounds': 30}
                         # Optuna pruning callback if available
                         try:
-                            from optuna.integration import XGBoostPruningCallback
-                            fit_kwargs['callbacks'] = [XGBoostPruningCallback(trial, 'validation_0-logloss')]
+                            import importlib
+                            integ = importlib.import_module('optuna.integration')
+                            cb = getattr(integ, 'XGBoostPruningCallback', None)
+                            if cb is not None:
+                                fit_kwargs['callbacks'] = [cb(trial, 'validation_0-logloss')]
+                        except Exception:
+                            # XGBoostPruningCallback not available, continue without pruning
+                            pass
+                        if sample_weight is not None:
+                            fit_kwargs['sample_weight'] = sample_weight[train_idx]
+                        model.fit(X_tr, y_tr, **fit_kwargs)
+                    elif model_name == 'lgbm' and HAS_LIGHTGBM:
+                        fit_kwargs = {'eval_set': [(X_val, y_val)], 'verbose': False}
+                        # Early stopping for LightGBM
+                        try:
+                            fit_kwargs['early_stopping_rounds'] = 50
                         except Exception:
                             pass
                         if sample_weight is not None:
@@ -443,27 +558,63 @@ class EnsembleTrainer:
 
         study = optuna.create_study(direction='maximize', pruner=pruner)
         print(f"Optuna[{model_name}]: starting optimization (trials={n_trials}, timeout={timeout})")
-        study.optimize(objective, n_trials=n_trials, timeout=timeout, show_progress_bar=True)
+        # Early stopping for study convergence: stop if no improvement >0.002 over last 10 trials
+        last_best = [-np.inf]
+        non_improve = [0]
+        improve_eps = 0.002
+        def _early_stop_cb(study, trial):
+            best = study.best_value
+            if best is None:
+                return
+            if best > last_best[0] + improve_eps:
+                last_best[0] = best
+                non_improve[0] = 0
+            else:
+                non_improve[0] += 1
+                if non_improve[0] >= 10:
+                    print("Optuna: stopping early due to plateau (no improvement > 0.002 over last 10 trials)")
+                    study.stop()
+
+        study.optimize(objective, n_trials=n_trials, timeout=timeout, show_progress_bar=True, callbacks=[_early_stop_cb])
         print(f"Optuna[{model_name}]: done. Best value={study.best_value:.4f}")
 
         best_params = study.best_params
         print(f"Optuna best for {model_name}: {best_params}")
+        # Two-stage training: refit with larger n_estimators for the best params
+        refit_estimators = None
+        if model_name == 'random_forest':
+            refit_estimators = 800
+        elif model_name == 'xgboost' and HAS_XGBOOST:
+            refit_estimators = 600
+        elif model_name == 'lgbm' and HAS_LIGHTGBM:
+            refit_estimators = 600
+        if refit_estimators is not None:
+            print(f"Refit best params with large n_estimators: {refit_estimators}")
+
         # Build final model with best params
         if model_name == 'logistic':
             best = LogisticRegression(random_state=42, max_iter=2000, class_weight='balanced',
                                       penalty='l2', solver='lbfgs', C=best_params.get('C', 1.0))
         elif model_name == 'random_forest':
+            mf_any = best_params.get('max_features', 'sqrt')
+            if isinstance(mf_any, (int, float)):
+                max_features_rf: float | Literal['sqrt', 'log2'] = float(mf_any)
+            elif isinstance(mf_any, str) and mf_any in ('sqrt', 'log2'):
+                max_features_rf = cast(Literal['sqrt', 'log2'], mf_any)
+            else:
+                max_features_rf = 'sqrt'
             best = RandomForestClassifier(
-                n_estimators=best_params.get('n_estimators', 100),
+                n_estimators=(refit_estimators if refit_estimators is not None else best_params.get('n_estimators', 100)),
                 max_depth=best_params.get('max_depth', None),
                 min_samples_split=best_params.get('min_samples_split', 2),
                 min_samples_leaf=best_params.get('min_samples_leaf', 1),
-                max_features=best_params.get('max_features', 'sqrt'),
+                max_features=max_features_rf,
                 class_weight='balanced', random_state=42, n_jobs=-1)
         elif model_name == 'xgboost' and HAS_XGBOOST:
+            assert xgb is not None
             best = xgb.XGBClassifier(
                 random_state=42,
-                n_estimators=best_params.get('n_estimators', 100),
+                n_estimators=(refit_estimators if refit_estimators is not None else best_params.get('n_estimators', 100)),
                 learning_rate=best_params.get('learning_rate', 0.05),
                 max_depth=best_params.get('max_depth', 4),
                 min_child_weight=best_params.get('min_child_weight', 3),
@@ -473,6 +624,21 @@ class EnsembleTrainer:
                 reg_alpha=best_params.get('reg_alpha', 0.1),
                 reg_lambda=best_params.get('reg_lambda', 1.0),
                 eval_metric='logloss')
+        elif model_name == 'lgbm' and HAS_LIGHTGBM:
+            assert LGBMClassifier is not None
+            best = LGBMClassifier(
+                random_state=42,
+                n_estimators=(refit_estimators if refit_estimators is not None else best_params.get('n_estimators', 200)),
+                learning_rate=best_params.get('learning_rate', 0.05),
+                num_leaves=best_params.get('num_leaves', 31),
+                feature_fraction=best_params.get('feature_fraction', 0.8),
+                bagging_fraction=best_params.get('bagging_fraction', 0.8),
+                min_child_samples=best_params.get('min_child_samples', 20),
+                reg_alpha=best_params.get('reg_alpha', 0.0),
+                reg_lambda=best_params.get('reg_lambda', 1.0),
+                class_weight='balanced',
+                n_jobs=-1
+            )
         else:
             best = base_model
         try:
@@ -500,12 +666,22 @@ class EnsembleTrainer:
             print(f"Training and tuning {name}...")
             try:
                 tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model, sample_weight=sample_weight)
-                tuned_models.append((name, tuned_model))
-                self.models[name] = tuned_model
-                print(f"✅ {name} trained successfully")
+                # Probability calibration (isotonic)
+                print(f"Calibrating {name}...")
+                calibrated_model = CalibratedClassifierCV(tuned_model, method='isotonic', cv=3)
+                try:
+                    if sample_weight is not None:
+                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                    else:
+                        calibrated_model.fit(X_scaled, y)
+                except TypeError:
+                    calibrated_model.fit(X_scaled, y)
+                tuned_models.append((name, calibrated_model))
+                self.models[name] = calibrated_model
+                print(f"✅ {name} trained and calibrated successfully")
             except Exception as e:
                 print(f"❌ {name} training failed: {e}")
-                # Add untrained model as fallback
+                # Fallback: fit default model then calibrate
                 try:
                     if sample_weight is not None:
                         model.fit(X_scaled, y, sample_weight=sample_weight)
@@ -513,9 +689,18 @@ class EnsembleTrainer:
                         model.fit(X_scaled, y)
                 except Exception:
                     model.fit(X_scaled, y)
-                tuned_models.append((name, model))
-                self.models[name] = model
-                print(f"⚠️ {name} using default parameters")
+                print(f"Calibrating {name} (fallback)...")
+                calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
+                try:
+                    if sample_weight is not None:
+                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                    else:
+                        calibrated_model.fit(X_scaled, y)
+                except TypeError:
+                    calibrated_model.fit(X_scaled, y)
+                tuned_models.append((name, calibrated_model))
+                self.models[name] = calibrated_model
+                print(f"⚠️ {name} using default parameters with calibration")
 
         if not tuned_models:
             raise RuntimeError("No models could be trained")
@@ -548,8 +733,18 @@ class EnsembleTrainer:
             print(f"Training and tuning {name} (stacking)...")
             try:
                 tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model, sample_weight=sample_weight)
-                self.models[name] = tuned_model
-                tuned_models.append((name, tuned_model))
+                # Probability calibration (isotonic) for stacking base estimator
+                print(f"Calibrating {name} (stacking)...")
+                calibrated_model = CalibratedClassifierCV(tuned_model, method='isotonic', cv=3)
+                try:
+                    if sample_weight is not None:
+                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                    else:
+                        calibrated_model.fit(X_scaled, y)
+                except TypeError:
+                    calibrated_model.fit(X_scaled, y)
+                self.models[name] = calibrated_model
+                tuned_models.append((name, calibrated_model))
             except Exception as e:
                 print(f"{name} tuning failed: {e} — using default")
                 try:
@@ -559,8 +754,17 @@ class EnsembleTrainer:
                         model.fit(X_scaled, y)
                 except Exception:
                     model.fit(X_scaled, y)
-                self.models[name] = model
-                tuned_models.append((name, model))
+                print(f"Calibrating {name} (stacking fallback)...")
+                calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
+                try:
+                    if sample_weight is not None:
+                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                    else:
+                        calibrated_model.fit(X_scaled, y)
+                except TypeError:
+                    calibrated_model.fit(X_scaled, y)
+                self.models[name] = calibrated_model
+                tuned_models.append((name, calibrated_model))
         # Meta-learner with regularization and CV blending
         meta_C = float(getattr(self, 'meta_C', 0.5))
         final_est = LogisticRegression(max_iter=2000, class_weight='balanced', solver='lbfgs', penalty='l2', C=meta_C)
@@ -586,7 +790,7 @@ class EnsembleTrainer:
     def train_model(self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None):
         if self.model_type == 'stacking':
             return self.train_stacking(X, y, sample_weight=sample_weight)
-        elif self.model_type in ('ensemble', 'xgboost', 'random_forest', 'logistic'):
+        elif self.model_type in ('ensemble', 'xgboost', 'random_forest', 'logistic', 'lgbm'):
             return self.train_ensemble(X, y, sample_weight=sample_weight)
         else:
             print(f"Unknown model_type {self.model_type}, defaulting to ensemble")
@@ -610,6 +814,7 @@ class EnsembleTrainer:
         # SHAP values if available
         if HAS_SHAP and 'xgboost' in self.models:
             try:
+                assert shap is not None
                 explainer = shap.TreeExplainer(self.models['xgboost'])
                 shap_values = explainer.shap_values(X[:100])  # Sample for speed
                 shap_importance = np.abs(shap_values).mean(0)
@@ -623,7 +828,7 @@ class EnsembleTrainer:
         return importance_dict
 
     def evaluate_model(self, model: Any, X: np.ndarray, y: np.ndarray,
-                      model_name: str = "model") -> Dict[str, float]:
+                      model_name: str = "model") -> Dict[str, Any]:
         """Evaluate model performance with comprehensive metrics"""
         from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                                    f1_score, classification_report, confusion_matrix)
@@ -643,12 +848,13 @@ class EnsembleTrainer:
         except:
             pass
 
-        # Convert predictions back to original labels if needed
-        if hasattr(self, 'label_encoder') and hasattr(y[0], '__class__') and isinstance(y[0], str):
-            # y is original string labels, convert predictions back
-            y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
+        # Convert predictions back to original labels (if label encoder exists)
+        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+            try:
+                y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
+            except Exception:
+                y_pred = y_pred_encoded
         else:
-            # y is already encoded, use encoded predictions
             y_pred = y_pred_encoded
 
         # Basic metrics
@@ -659,12 +865,15 @@ class EnsembleTrainer:
         precision = precision_score(y, y_pred, average=avg_method, zero_division=0)
         recall = recall_score(y, y_pred, average=avg_method, zero_division=0)
         f1 = f1_score(y, y_pred, average=avg_method, zero_division=0)
+        # Macro-averaged F1 for balanced view across classes
+        f1_macro = f1_score(y, y_pred, average='macro', zero_division=0)
 
-        metrics = {
+        metrics: Dict[str, Any] = {
             'accuracy': float(accuracy),
             'precision': float(precision),
             'recall': float(recall),
-            'f1_score': float(f1)
+            'f1_score': float(f1),
+            'f1_macro': float(f1_macro),
         }
 
         # AUC for multiclass (if probabilities available)
@@ -682,13 +891,39 @@ class EnsembleTrainer:
         else:
             metrics['auc'] = 0.0
 
+        # Brier score (calibration) if probabilities are available
+        try:
+            from sklearn.metrics import brier_score_loss
+            if y_pred_proba is not None and hasattr(model, 'classes_') and hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                cols_classes = list(getattr(model, 'classes_', []))
+                try:
+                    col_labels = self.label_encoder.inverse_transform(np.array(cols_classes, dtype=int))
+                except Exception:
+                    col_labels = np.array(cols_classes)
+                briers = []
+                for j, lbl in enumerate(col_labels):
+                    y_true_bin = (np.array(y) == lbl).astype(int)
+                    p = y_pred_proba[:, j]
+                    try:
+                        b = brier_score_loss(y_true_bin, p)
+                        briers.append(b)
+                    except Exception:
+                        pass
+                if briers:
+                    metrics['brier_score_mean'] = float(np.mean(briers))
+        except Exception as _e:
+            pass
+
         # Print detailed results
         print(f"\n📊 {model_name} Performance:")
-        print(f"  Accuracy:  {accuracy:.4f}")
-        print(f"  Precision: {precision:.4f}")
-        print(f"  Recall:    {recall:.4f}")
-        print(f"  F1 Score:  {f1:.4f}")
-        print(f"  AUC:       {metrics['auc']:.4f}")
+        print(f"  Accuracy:   {accuracy:.4f}")
+        print(f"  Precision:  {precision:.4f}")
+        print(f"  Recall:     {recall:.4f}")
+        print(f"  F1 (weighted): {f1:.4f}")
+        print(f"  F1 (macro):    {metrics.get('f1_macro', 0.0):.4f}")
+        print(f"  AUC:        {metrics['auc']:.4f}")
+        if 'brier_score_mean' in metrics:
+            print(f"  Brier (mean, multiclass one-vs-rest): {metrics['brier_score_mean']:.6f}")
 
         # Classification report + confusion matrix
         print(f"\n📋 {model_name} Classification Report:")
@@ -696,8 +931,28 @@ class EnsembleTrainer:
             report_text = classification_report(y, y_pred, zero_division=0)
             print(report_text)
             try:
-                report_dict = classification_report(y, y_pred, output_dict=True, zero_division=0)
+                report_dict_any = classification_report(y, y_pred, output_dict=True, zero_division=0)
+                report_dict: Dict[str, Any] = cast(Dict[str, Any], report_dict_any)
                 metrics['per_class'] = report_dict
+                # Extract STRONG_UP and STRONG_DOWN precision/recall if present
+                try:
+                    su_any = report_dict.get('STRONG_UP', {})
+                    sd_any = report_dict.get('STRONG_DOWN', {})
+                    su = cast(Dict[str, Any], su_any) if isinstance(su_any, dict) else {}
+                    sd = cast(Dict[str, Any], sd_any) if isinstance(sd_any, dict) else {}
+                    metrics['precision_STRONG_UP'] = float(su.get('precision', 0.0))
+                    metrics['recall_STRONG_UP'] = float(su.get('recall', 0.0))
+                    metrics['precision_STRONG_DOWN'] = float(sd.get('precision', 0.0))
+                    metrics['recall_STRONG_DOWN'] = float(sd.get('recall', 0.0))
+                    # Console preview
+                    if su or sd:
+                        print("Key class metrics:")
+                        print(f"  STRONG_UP   -> P: {metrics['precision_STRONG_UP']:.4f}, R: {metrics['recall_STRONG_UP']:.4f}")
+                        print(f"  STRONG_DOWN -> P: {metrics['precision_STRONG_DOWN']:.4f}, R: {metrics['recall_STRONG_DOWN']:.4f}")
+                except Exception:
+                    pass
+
+
             except Exception:
                 pass
         except Exception as e:
@@ -710,15 +965,136 @@ class EnsembleTrainer:
 
         return metrics
 
-    def train_and_evaluate(self, X: np.ndarray, y: np.ndarray,
-                          dates: Optional[List['pd.Timestamp']] = None,
-                          tickers: Optional[List[str]] = None,
-                          test_size: float = 0.2,
-                          validation: str = 'simple',
-                          embargo_days: int = 20,
-                          n_splits: int = 3,
-                          horizon: int = 20,
-                          out_dir: Optional[Path] = None) -> Tuple[Any, Dict[str, Any]]:
+    def train_and_evaluate(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        dates: Optional[List[Any]] = None,
+        tickers: Optional[List[str]] = None,
+        test_size: float = 0.2,
+        validation: str = 'purged',
+        embargo_days: int = 20,
+        n_splits: int = 3,
+        horizon: int = 20,
+        out_dir: Optional[Path] = None,
+        ret_fwd: Optional[np.ndarray] = None,
+    ) -> Tuple[Any, Dict[str, Any]]:
+        """Train and evaluate with 'simple' or 'purged' validation.
+        Returns (model, results) where results contains train/test metrics and importance.
+        """
+        # Encode labels for estimators
+        y_encoded_any = self.label_encoder.fit_transform(y)
+        y_encoded = cast(np.ndarray, np.asarray(y_encoded_any))
+
+        # Class imbalance handling
+        def make_sample_weight(y_enc: np.ndarray) -> Optional[np.ndarray]:
+            try:
+                classes = np.unique(y_enc)
+                cw = compute_class_weight(class_weight='balanced', classes=classes, y=y_enc)
+                class_to_w = {c: w for c, w in zip(classes, cw)}
+                return np.asarray([class_to_w[v] for v in y_enc], dtype=float)
+            except Exception:
+                return None
+
+        # Simple time split
+        if validation != 'purged' or dates is None:
+            split_idx = int(len(X) * (1 - test_size))
+            X_train, X_test = X[:split_idx], X[split_idx:]
+            y_train_enc = cast(np.ndarray, y_encoded[:split_idx])
+            y_test_enc = cast(np.ndarray, y_encoded[split_idx:])
+            y_train_orig, y_test_orig = y[:split_idx], y[split_idx:]
+
+            sw = make_sample_weight(y_train_enc)
+            model = self.train_model(X_train, y_train_enc, sample_weight=sw)
+
+            train_metrics = self.evaluate_model(model, X_train, y_train_orig, "Training Set")
+            test_metrics = self.evaluate_model(model, X_test, y_test_orig, "Test Set")
+
+            feature_names = FEATURE_ORDER[:X.shape[1]]
+            importance = self.calculate_feature_importance(X_train, feature_names)
+
+            results: Dict[str, Any] = {
+                'train_metrics': train_metrics,
+                'test_metrics': test_metrics,
+                'feature_importance': importance,
+                'model': model,
+                'label_encoder': self.label_encoder,
+                'validation': 'simple',
+            }
+            return model, results
+
+        # Purged walk-forward with embargo
+        import pandas as _pd
+        date_ser = _pd.to_datetime(_pd.Series(dates))
+        uniq_dates = sorted(date_ser.dropna().unique())
+        if len(uniq_dates) < n_splits + 1:
+            n_splits = max(1, min(2, len(uniq_dates) - 1))
+        date_chunks = np.array_split(np.asarray(uniq_dates), n_splits)
+
+        fold_metrics: List[Dict[str, Any]] = []
+        last_model: Any = None
+
+        for test_dates in date_chunks:
+            if len(test_dates) == 0:
+                continue
+            test_start = test_dates[0]
+            test_end = test_dates[-1]
+            horizon_days = int(horizon)
+            emb_left = test_start - _pd.Timedelta(days=int(embargo_days + horizon_days))
+            emb_right = test_end + _pd.Timedelta(days=int(embargo_days))
+
+            test_mask = (date_ser >= test_start) & (date_ser <= test_end)
+            train_mask = _pd.Series(True, index=date_ser.index)
+            if tickers is not None and len(tickers) == len(date_ser):
+                tick_ser = _pd.Series(tickers)
+                for t in tick_ser[test_mask].unique():
+                    t_mask = (tick_ser == t)
+                    mask_embargo = t_mask & (date_ser >= emb_left) & (date_ser <= emb_right)
+                    train_mask[mask_embargo] = False
+            else:
+                train_mask = (date_ser < emb_left) | (date_ser > emb_right)
+
+            mask_train = cast(np.ndarray, np.asarray(train_mask.values, dtype=bool))
+            mask_test = cast(np.ndarray, np.asarray(test_mask.values, dtype=bool))
+            X_train, X_test = X[mask_train], X[mask_test]
+            y_train_enc = cast(np.ndarray, y_encoded[mask_train])
+            y_test_enc = cast(np.ndarray, y_encoded[mask_test])
+            y_test_orig = y[mask_test]
+            if len(X_train) < 50 or len(X_test) < 10:
+                continue
+
+            sw = make_sample_weight(y_train_enc)
+            model_i = self.train_model(X_train, y_train_enc, sample_weight=sw)
+            last_model = model_i
+            m = self.evaluate_model(model_i, X_test, y_test_orig, "Purged Fold")
+            fold_metrics.append(m)
+
+        def avg_dict(dicts: List[Dict[str, Any]]) -> Dict[str, float]:
+            if not dicts:
+                return {'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0, 'auc': 0.0}
+            keys = set().union(*[d.keys() for d in dicts])
+            out: Dict[str, float] = {}
+            for k in keys:
+                vals = [float(d.get(k, 0.0)) for d in dicts if isinstance(d.get(k, 0.0), (int, float))]
+                if vals:
+                    out[k] = float(np.mean(vals))
+            return out
+
+        test_metrics = avg_dict(fold_metrics)
+        importance: Dict[str, Any] = {}
+        results: Dict[str, Any] = {
+            'train_metrics': {},
+            'test_metrics': test_metrics,
+            'feature_importance': importance,
+            'model': last_model,
+            'label_encoder': self.label_encoder,
+            'validation': 'purged',
+            'n_splits': n_splits,
+            'embargo_days': embargo_days,
+        }
+        return last_model, results
+
+
         """Train ensemble and evaluate.
         validation: 'simple' (time split) or 'purged' (purged K-fold walk-forward with embargo)
         horizon: prediction horizon in days for horizon-adjusted purging
@@ -753,6 +1129,56 @@ class EnsembleTrainer:
             train_metrics = self.evaluate_model(model, X_train, y_train_orig, "Training Set")
             test_metrics = self.evaluate_model(model, X_test, y_test_orig, "Test Set")
 
+            # Decision-rule metrics on test set (OOF-like)
+            try:
+                if ret_fwd is not None and len(ret_fwd) == len(y_encoded):
+                    X_test_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
+                    proba = None
+                    try:
+                        proba = model.predict_proba(X_test_scaled)
+                    except Exception:
+                        proba = None
+                    if proba is not None:
+                        le_classes = np.array(getattr(self.label_encoder, 'classes_', []))
+                        model_classes = np.array(getattr(model, 'classes_', []))
+                        def col_for(label: str):
+                            if label in le_classes and model_classes.size > 0:
+                                enc_val = np.where(le_classes == label)[0]
+                                if enc_val.size > 0:
+                                    enc_val = int(enc_val[0])
+                                    idx = np.where(model_classes == enc_val)[0]
+                                    if idx.size > 0:
+                                        return int(idx[0])
+                            return None
+                        idx_down = col_for('DOWN'); idx_flat = col_for('FLAT'); idx_up = col_for('UP')
+                        n = len(X_test)
+                        p_down = proba[:, idx_down] if idx_down is not None else np.full(n, np.nan)
+                        p_flat = proba[:, idx_flat] if idx_flat is not None else np.full(n, np.nan)
+                        p_up = proba[:, idx_up] if idx_up is not None else np.full(n, np.nan)
+                        ret_test = np.asarray(ret_fwd)[split_idx:]
+                        oof_like = pd.DataFrame({'ret_fwd': ret_test, 'p_down': p_down, 'p_flat': p_flat, 'p_up': p_up})
+                        thr = find_thresholds_from_oof(oof_like, fee_bp=5)
+                        m_rule = compute_trade_metrics(oof_like, thr.get('tau', 0.1), thr.get('kappa', 0.6), fee_bp=5)
+                        print(f"Decision-rule Test Utility: {m_rule['utility']:.4f} | Hit Rate: {m_rule['hit_rate']*100:.2f}% | Trade Rate: {m_rule['trade_rate']*100:.2f}% | Avg/Trade: {m_rule['avg_return_per_trade']:.4f}")
+                        test_metrics.update({'utility': float(m_rule['utility']), 'hit_rate': float(m_rule['hit_rate']), 'trade_rate': float(m_rule['trade_rate']), 'avg_return_per_trade': float(m_rule['avg_return_per_trade'])})
+                        # Duplicate hyphenated keys for JSON compatibility
+                        test_metrics['hit-rate'] = float(m_rule['hit_rate'])
+                        test_metrics['trade-rate'] = float(m_rule['trade_rate'])
+
+            except Exception as e:
+                print(f"WARN: could not compute decision-rule test metrics: {e}")
+
+            # Save per-class metrics for simple validation
+            try:
+                if out_dir is not None and 'per_class' in test_metrics:
+                    (out_dir).mkdir(parents=True, exist_ok=True)
+                    with open(out_dir / 'test_per_class.json', 'w') as f:
+                        json.dump(test_metrics['per_class'], f)
+                    print(f"Saved per-class test metrics to {out_dir / 'test_per_class.json'}")
+            except Exception as e:
+                print(f"WARN: could not save test_per_class.json (simple): {e}")
+
+
             feature_names = FEATURE_ORDER[:X.shape[1]]
             importance = self.calculate_feature_importance(X_train, feature_names)
 
@@ -760,10 +1186,10 @@ class EnsembleTrainer:
                 'train_metrics': train_metrics,
                 'test_metrics': test_metrics,
                 'feature_importance': importance,
-                'model': ensemble,
+                'model': model,
                 'label_encoder': self.label_encoder
             }
-            return ensemble, results
+            return model, results
 
         # Purged walk-forward evaluation with embargo
         import pandas as _pd
@@ -778,6 +1204,8 @@ class EnsembleTrainer:
 
         fold_metrics: List[Dict[str, float]] = []
         last_model: Any = None
+        perm_importances_folds: List[np.ndarray] = []
+
         for i, test_dates in enumerate(date_chunks):
             if len(test_dates) == 0:
                 continue
@@ -833,6 +1261,97 @@ class EnsembleTrainer:
                 print(f"WARN: could not checkpoint fold model: {e}")
 
             m = self.evaluate_model(model_i, X_test, y_test_orig, f"Purged Fold {i+1}")
+            # Save out-of-fold (OOF) predictions for threshold optimization
+            try:
+                if out_dir is not None:
+                    X_test_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
+                    proba = None
+                    try:
+                        proba = model_i.predict_proba(X_test_scaled)
+                    except Exception:
+                        proba = None
+                    if proba is not None:
+                        import numpy as _np
+                        # Map probabilities to DOWN/FLAT/UP columns based on label encoder mapping
+                        le_classes = _np.array(getattr(self.label_encoder, 'classes_', []))
+                        model_classes = _np.array(getattr(model_i, 'classes_', []))
+                        def col_for(label: str):
+                            if label in le_classes and model_classes.size > 0:
+                                enc_val = _np.where(le_classes == label)[0]
+                                if enc_val.size > 0:
+                                    enc_val = int(enc_val[0])
+                                    idx = _np.where(model_classes == enc_val)[0]
+                                    if idx.size > 0:
+                                        return int(idx[0])
+                            return None
+                        idx_down = col_for('DOWN')
+                        idx_flat = col_for('FLAT')
+                        idx_up = col_for('UP')
+                        n = len(X_test)
+                        p_down = proba[:, idx_down] if idx_down is not None else _np.full(n, _np.nan)
+                        p_flat = proba[:, idx_flat] if idx_flat is not None else _np.full(n, _np.nan)
+                        p_up = proba[:, idx_up] if idx_up is not None else _np.full(n, _np.nan)
+                        dates_fold = _pd.to_datetime(date_ser[test_mask].values)
+                        if tickers is not None and len(tickers) == len(date_ser):
+                            tickers_fold = _np.asarray(tickers)[test_mask.values]
+                        else:
+                            tickers_fold = _np.array(['NA'] * n)
+                        if ret_fwd is not None and len(ret_fwd) == len(date_ser):
+                            ret_fwd_fold = _np.asarray(ret_fwd)[test_mask.values]
+                        else:
+                            ret_fwd_fold = _np.full(n, _np.nan)
+                        oof_df = _pd.DataFrame({
+                            'date': dates_fold,
+                            'ticker': tickers_fold,
+                            'y_true': _np.asarray(y_test_orig),
+                            'ret_fwd': ret_fwd_fold,
+                            'p_down': p_down,
+                            'p_flat': p_flat,
+                            'p_up': p_up,
+                        })
+                        (out_dir).mkdir(parents=True, exist_ok=True)
+                        oof_path = out_dir / f"fold_{i+1}_oof.csv"
+                        oof_df.to_csv(oof_path, index=False)
+                        print(f"Saved OOF predictions to {oof_path}")
+            except Exception as e:
+                print(f"WARN: could not save OOF predictions for fold {i+1}: {e}")
+
+            # Per-fold permutation importance on validation set
+            try:
+                from sklearn.inspection import permutation_importance
+                # Use the same scaling as predictions
+                X_val_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
+                # y for scoring should be encoded to match estimator predictions
+                result_pi = permutation_importance(
+                    model_i, X_val_scaled, y_test_enc,
+                    scoring='f1_weighted', n_repeats=10, random_state=42, n_jobs=-1
+                )
+                importances_mean = result_pi.importances_mean
+                # Save per-fold JSON with feature names and scores
+                try:
+                    if out_dir is not None:
+                        (out_dir).mkdir(parents=True, exist_ok=True)
+                        feature_names_fold = FEATURE_ORDER[:X.shape[1]]
+                        pi_items = [
+                            {'feature': feature_names_fold[j], 'importance': float(importances_mean[j])}
+                            for j in range(len(importances_mean))
+                        ]
+                        with open(out_dir / f"fold_{i+1}_perm_importance.json", 'w') as f:
+                            json.dump(pi_items, f)
+                        print(f"Saved permutation importance for fold {i+1} -> {out_dir / f'fold_{i+1}_perm_importance.json'}")
+                except Exception as e:
+                    print(f"WARN: could not save permutation importance for fold {i+1}: {e}")
+                # Keep for aggregation
+                perm_importances_folds.append(importances_mean)
+            except Exception as e:
+                print(f"WARN: permutation importance failed for fold {i+1}: {e}")
+
+
+                # Keep for aggregation
+                perm_importances_folds.append(importances_mean)
+            except Exception as e:
+                print(f"WARN: permutation importance failed for fold {i+1}: {e}")
+
             fold_metrics.append(m)
             # Save per-fold metrics
             try:
@@ -859,6 +1378,114 @@ class EnsembleTrainer:
 
         test_metrics = avg_dict(fold_metrics)
         importance = {}
+        # Aggregate permutation importance across folds
+        try:
+            if perm_importances_folds:
+                agg_arr = np.vstack(perm_importances_folds)
+                mean_imp = agg_arr.mean(axis=0)
+                std_imp = agg_arr.std(axis=0)
+                features_agg = FEATURE_ORDER[:X.shape[1]]
+                agg_items = [
+                    {'feature': features_agg[j],
+                     'importance_mean': float(mean_imp[j]),
+                     'importance_std': float(std_imp[j])}
+                    for j in range(len(mean_imp))
+                ]
+                # Save aggregated JSON
+                if out_dir is not None:
+                    (out_dir).mkdir(parents=True, exist_ok=True)
+                    with open(out_dir / 'perm_importance_avg.json', 'w') as f:
+                        json.dump(agg_items, f)
+                # Console: top-5 features by mean importance
+                top_idx = np.argsort(mean_imp)[::-1][:5]
+                print("Top-5 permutation importance (averaged across purged folds):")
+                for rank, j in enumerate(top_idx, start=1):
+                    print(f"  {rank}. {features_agg[j]}: {mean_imp[j]:.6f}")
+        except Exception as e:
+            print(f"WARN: failed to aggregate permutation importance: {e}")
+
+
+        # After cross-validation: optional threshold optimization from OOF predictions
+        try:
+            if out_dir is not None:
+                import pandas as _pd
+                oof_files = sorted((out_dir).glob("fold_*_oof.csv"))
+                if oof_files:
+                    oof_list = []
+                    for fp in oof_files:
+                        try:
+                            oof_list.append(_pd.read_csv(fp, parse_dates=["date"]))
+                        except Exception as e:
+                            print(f"WARN: could not read {fp}: {e}")
+                    if oof_list:
+                        oof_all = _pd.concat(oof_list, ignore_index=True)
+                        thr = find_thresholds_from_oof(oof_all, fee_bp=5)
+                        # Save thresholds
+                        try:
+                            with open(out_dir / "thresholds.json", "w") as f:
+                                json.dump(thr, f)
+                            print(f"Saved threshold optimization to {out_dir / 'thresholds.json'}")
+                        except Exception as e:
+                            print(f"WARN: could not save thresholds.json: {e}")
+
+                        # Compute and log OOF decision-rule metrics
+                        try:
+                            m_rule = compute_trade_metrics(oof_all, thr.get('tau', 0.1), thr.get('kappa', 0.6), fee_bp=5)
+                            print(f"Decision-rule OOF Utility: {m_rule['utility']:.4f} | Hit Rate: {m_rule['hit_rate']*100:.2f}% | Trade Rate: {m_rule['trade_rate']*100:.2f}% | Avg/Trade: {m_rule['avg_return_per_trade']:.4f}")
+                            test_metrics.update({'utility': float(m_rule['utility']), 'hit_rate': float(m_rule['hit_rate']), 'trade_rate': float(m_rule['trade_rate']), 'avg_return_per_trade': float(m_rule['avg_return_per_trade'])})
+
+                            # Trading summary with optimized thresholds
+                            try:
+                                decisions = apply_decision_rule(oof_all[['p_down', 'p_flat', 'p_up']], thr.get('tau', 0.1), thr.get('kappa', 0.6))
+                                ret = pd.to_numeric(oof_all['ret_fwd'], errors='coerce')
+                                trade_ret = pd.Series(np.where(decisions == 1, ret, np.where(decisions == -1, -ret, np.nan))).dropna()
+                                total_trades = int(len(trade_ret))
+                                win_pct = float((trade_ret > 0).mean()) if total_trades > 0 else 0.0
+                                avg_win_return = float(trade_ret[trade_ret > 0].mean()) if (trade_ret > 0).any() else 0.0
+                                avg_loss_return = float(trade_ret[trade_ret < 0].mean()) if (trade_ret < 0).any() else 0.0
+                                expected_return_per_trade = float(trade_ret.mean()) if total_trades > 0 else 0.0
+                                expected_return_total = float(trade_ret.sum()) if total_trades > 0 else 0.0
+                                # Update and print
+                                test_metrics.update({
+                                    'expected_return_per_trade': expected_return_per_trade,
+                                    'expected_return_total': expected_return_total,
+                                    'total_trades': total_trades,
+                                    'win_pct': win_pct,
+                                    'avg_win_return': avg_win_return,
+                                    'avg_loss_return': avg_loss_return,
+                                })
+                                print("Trading summary (OOF, optimized thresholds):")
+                                print(f"  Trades: {total_trades} | Win %: {win_pct*100:.2f}% | Avg win: {avg_win_return:.5f} | Avg loss: {avg_loss_return:.5f} | Exp/Trade: {expected_return_per_trade:.5f}")
+                            except Exception as e:
+                                print(f"WARN: could not compute trading summary: {e}")
+
+                            # OOF per-class classification metrics and save
+                            try:
+                                # Pred label = argmax among DOWN/FLAT/UP
+                                prob_mat = np.vstack([oof_all['p_down'].values, oof_all['p_flat'].values, oof_all['p_up'].values]).T
+                                idx = np.nanargmax(prob_mat, axis=1)
+                                label_map = np.array(['DOWN', 'FLAT', 'UP'])
+                                y_pred_oof = label_map[idx]
+                                from sklearn.metrics import classification_report
+                                report_dict = classification_report(oof_all['y_true'].values, y_pred_oof, output_dict=True, zero_division=0)
+                                if out_dir is not None:
+                                    (out_dir).mkdir(parents=True, exist_ok=True)
+                                    with open(out_dir / 'test_per_class.json', 'w') as f:
+                                        json.dump(report_dict, f)
+                                    print(f"Saved OOF per-class metrics to {out_dir / 'test_per_class.json'}")
+                            except Exception as e:
+                                print(f"WARN: could not save OOF per-class metrics: {e}")
+
+                            # Duplicate hyphenated keys for JSON compatibility
+                            test_metrics['hit-rate'] = float(m_rule['hit_rate'])
+                            test_metrics['trade-rate'] = float(m_rule['trade_rate'])
+                        except Exception as e:
+                            print(f"WARN: could not compute decision-rule OOF metrics: {e}")
+                        except Exception as e:
+                            print(f"WARN: could not compute decision-rule OOF metrics: {e}")
+
+        except Exception as e:
+            print(f"WARN: threshold optimization failed: {e}")
 
         results = {
             'train_metrics': {},
@@ -904,9 +1531,9 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df['price_over_sma200'] = np.clip(df['Close'] / df['sma200'], 0.5, 2.0)
 
     # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    delta = pd.to_numeric(df['Close'].diff(), errors='coerce').astype('float64')
+    gain = delta.where(delta > 0, 0.0).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
     # Add small epsilon to prevent division by zero
     rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
@@ -914,9 +1541,9 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ATR
     high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    high_close = (df['High'] - df['Close'].shift()).abs()
+    low_close = (df['Low'] - df['Close'].shift()).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = true_range.rolling(window=14).mean()
     df['atr_pct'] = np.clip(df['atr'] / df['Close'], 0, 0.5)  # Cap at 50%
 
@@ -941,6 +1568,8 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     vol_ma20 = df['Volume'].rolling(20).mean()
     vol_ma20_lag = vol_ma20.shift(5)
     df['vol20_rising'] = (vol_ma20 > vol_ma20_lag).astype(int)
+
+
 
     df['price_gt_ma20'] = (df['Close'] > df['sma20']).astype(int)
     df['rsi_oversold'] = (df['rsi'] < 30).astype(int)
@@ -986,29 +1615,30 @@ def create_labels(df: pd.DataFrame, horizon: int, label_type: str,
     Percentiles computed per-ticker dataframe to be regime-aware.
     """
     future_returns = df['Close'].shift(-horizon) / df['Close'] - 1
+    fr = pd.to_numeric(future_returns, errors='coerce').astype('float64')
 
     if label_type == 'binary':
-        return (future_returns > 0.02).astype(int)  # 2% threshold
+        return (fr > 0.02).astype(int)  # 2% threshold
     elif label_type == 'multiclass':
         labels = pd.Series(index=df.index, dtype='object')
-        labels[future_returns >= 0.10] = 'STRONG_UP'
-        labels[(future_returns >= 0.02) & (future_returns < 0.10)] = 'WEAK_UP'
-        labels[(future_returns >= -0.02) & (future_returns < 0.02)] = 'SIDEWAYS'
-        labels[(future_returns >= -0.10) & (future_returns < -0.02)] = 'WEAK_DOWN'
-        labels[future_returns < -0.10] = 'STRONG_DOWN'
+        labels[fr >= 0.10] = 'STRONG_UP'
+        labels[(fr >= 0.02) & (fr < 0.10)] = 'WEAK_UP'
+        labels[(fr >= -0.02) & (fr < 0.02)] = 'SIDEWAYS'
+        labels[(fr >= -0.10) & (fr < -0.02)] = 'WEAK_DOWN'
+        labels[fr < -0.10] = 'STRONG_DOWN'
         categories = ['STRONG_DOWN', 'WEAK_DOWN', 'SIDEWAYS', 'WEAK_UP', 'STRONG_UP']
         labels = pd.Categorical(labels, categories=categories, ordered=True)
         return pd.Series(labels, index=df.index)
     elif label_type == 'trinary':
-        ret_clean = future_returns.dropna()
+        ret_clean = fr.dropna()
         if len(ret_clean) == 0:
             return pd.Series(index=df.index, dtype='object')
         low_cut = ret_clean.quantile(q_low)
         high_cut = ret_clean.quantile(q_high)
         labels = pd.Series(index=df.index, dtype='object')
-        labels[future_returns <= low_cut] = 'DOWN'
-        labels[(future_returns > low_cut) & (future_returns < high_cut)] = 'FLAT'
-        labels[future_returns >= high_cut] = 'UP'
+        labels[fr <= low_cut] = 'DOWN'
+        labels[(fr > low_cut) & (fr < high_cut)] = 'FLAT'
+        labels[fr >= high_cut] = 'UP'
         categories = ['DOWN', 'FLAT', 'UP']
         labels = pd.Categorical(labels, categories=categories, ordered=True)
         return pd.Series(labels, index=df.index)
@@ -1016,17 +1646,21 @@ def create_labels(df: pd.DataFrame, horizon: int, label_type: str,
         return future_returns
 
 def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
-                 q_low: float = 0.33, q_high: float = 0.67) -> Tuple[np.ndarray, np.ndarray, List[pd.Timestamp], List[str]]:
+                 q_low: float = 0.33, q_high: float = 0.67) -> Tuple[np.ndarray, np.ndarray, List[pd.Timestamp], List[str], List[str], np.ndarray]:
     """Build training dataset with universe breadth and optional calendar dummies.
-    Returns X, y, dates, tickers (row-wise aligned).
+    Returns X, y, dates, tickers (row-wise aligned), feature_names actually used, ret_fwd per row.
     """
     all_features: List[np.ndarray] = []
     all_labels: List[np.ndarray] = []
     all_dates: List[pd.Timestamp] = []
     all_tickers: List[str] = []
+    all_ret_fwd: List[np.ndarray] = []
+    final_feature_names: Optional[List[str]] = None
 
     # 1) Load optional calendars
     fomc_dates: set[pd.Timestamp] = set()
+
+
     fomc_expected_change: Dict[pd.Timestamp, float] = {}
     earnings_events: Dict[str, List[Dict[str, Any]]] = {}
     try:
@@ -1111,8 +1745,9 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
         union_index = s.index if union_index is None else union_index.union(s.index)
     above_df = pd.DataFrame(index=union_index)
     for t, s in above_map.items():
-        above_df[t] = s.reindex(union_index).ffill().bfill()
-    breadth_true = above_df.mean(axis=1).rolling(10).mean().clip(0, 1)
+        # Forward-fill only to avoid look-ahead bias (no backfill)
+        above_df[t] = s.reindex(union_index).ffill()
+    breadth_true = above_df.mean(axis=1).rolling(10, min_periods=1).mean().clip(0, 1)
 
     # Prioritized features (cap to 22 later)
     prioritized = [
@@ -1120,16 +1755,28 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
         'price_momentum_5d','price_momentum_10d','bb_position','volume_trend',
         'volatility_rank','vol_ratio','sma_alignment','above_all_smas','rsi_momentum',
         'momentum_diff_5_20','liquidity_volume_pct','breadth_proxy',
+        # New regime/signal features
+        'rel_strength_spy','breadth_proxy_delta_10d','rv_20_z','rv_10_z','dollar_vol_pct','rv_60_z',
         # Calendar features
         'is_fomc','days_since_fomc','days_until_fomc','fomc_expected_change',
         'is_earnings_window','earnings_surprise','earnings_guidance','earnings_pre','earnings_post'
     ]
 
+    # Precompute SPY relative ratio for rel_strength_spy
+    spy_rel = None
+    try:
+        spy_df = fetch_history('SPY', years)
+        if spy_df is not None and len(spy_df) >= 100:
+            spy_feats = compute_basic_features(spy_df)
+            spy_rel = (spy_feats['Close'] / (spy_feats['sma50'] + 1e-8)).replace([np.inf, -np.inf], np.nan)
+    except Exception as e:
+        print(f"WARN: could not compute SPY relative series: {e}")
+
     # 4) Second pass: align, add breadth + calendar dummies, label, and collect
     for ticker, df_features in data_by_ticker.items():
         print(f"Processing {ticker}...")
         # Breadth as context
-        df_features['breadth_proxy'] = breadth_true.reindex(df_features.index).ffill().bfill()
+        df_features['breadth_proxy'] = breadth_true.reindex(df_features.index).ffill()
         # FOMC features
         idx_norm = pd.to_datetime(df_features.index).normalize()
         if fomc_dates:
@@ -1176,6 +1823,9 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
                     surprise.loc[d] = float(ev.get('surprise', 0.0))
                     guidance.loc[d] = float(ev.get('guidance', 0.0))
                     tval = str(ev.get('time', '')).lower()
+
+
+
                     if tval in ('bmo', 'pre', 'pre-market', 'premarket'):
                         is_pre.loc[d] = 1
                     if tval in ('amc', 'post', 'post-market', 'aftermarket'):
@@ -1193,6 +1843,34 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
             df_features['earnings_pre'] = 0
             df_features['earnings_post'] = 0
 
+        # New regime/signal features (no backfill; only past info)
+        try:
+            # 10-day change in breadth proxy
+            df_features['breadth_proxy_delta_10d'] = df_features['breadth_proxy'] - df_features['breadth_proxy'].shift(10)
+
+            # Realized volatility z-scores
+            ret = df_features['Close'].pct_change()
+            def _rv_z(ret_ser: pd.Series, w: int) -> pd.Series:
+                rv = ret_ser.rolling(window=w, min_periods=max(5, w // 2)).std()
+                m = rv.rolling(window=252, min_periods=20).mean()
+                s = rv.rolling(window=252, min_periods=20).std()
+                return (rv - m) / (s + 1e-8)
+            df_features['rv_10_z'] = _rv_z(ret, 10).replace([np.inf, -np.inf], np.nan)
+            df_features['rv_20_z'] = _rv_z(ret, 20).replace([np.inf, -np.inf], np.nan)
+            df_features['rv_60_z'] = _rv_z(ret, 60).replace([np.inf, -np.inf], np.nan)
+
+            # Dollar volume percentile rank over 252 days
+            dv = (df_features['Close'] * df_features['Volume']).astype(float)
+            df_features['dollar_vol_pct'] = dv.rolling(window=252, min_periods=20).rank(pct=True)
+
+            # Relative strength vs SPY (ffill only; no backfill)
+            if spy_rel is not None:
+                ticker_rel = (df_features['Close'] / (df_features['sma50'] + 1e-8))
+                spy_aligned = spy_rel.reindex(df_features.index).ffill()
+                df_features['rel_strength_spy'] = (ticker_rel / (spy_aligned + 1e-8)).replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            print(f"WARN: regime features for {ticker} failed: {e}")
+
         # Labels
         labels = create_labels(df_features, horizon, label_type, q_low=q_low, q_high=q_high)
         available = [c for c in prioritized if c in df_features.columns]
@@ -1200,33 +1878,44 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
             available = FEATURE_ORDER[:22]
         current_features = list(dict.fromkeys(available))[:22]
 
+
+        if final_feature_names is None:
+            final_feature_names = current_features
+
         feature_data = df_features[current_features]
         feature_data = feature_data.dropna(how='all').ffill().bfill()
         label_data = labels.loc[feature_data.index]
         valid_mask = label_data.notna()
         feature_data = feature_data[valid_mask]
+        # Compute aligned forward returns for OOF logging
+        future_returns_full = df_features['Close'].shift(-horizon) / df_features['Close'] - 1
+        ret_data = future_returns_full.loc[feature_data.index][valid_mask].values
+
         label_data = label_data[valid_mask]
 
         if len(feature_data) < 20:
             print(f"Skipping {ticker}: insufficient aligned samples ({len(feature_data)})")
             continue
 
-        all_features.append(feature_data.values)
-        all_labels.append(label_data.values)
+        all_features.append(np.asarray(feature_data.values))
+        all_labels.append(np.asarray(label_data.values))
         all_dates.extend(list(feature_data.index))
         all_tickers.extend([ticker] * len(feature_data))
+        all_ret_fwd.append(np.asarray(ret_data))
         print(f"✅ Added {ticker}: {len(feature_data)} samples")
 
     X = np.vstack(all_features)
     y = np.concatenate(all_labels)
-    return X, y, all_dates, all_tickers
+    ret_fwd = np.concatenate(all_ret_fwd) if all_ret_fwd else np.array([])
+    feature_names = final_feature_names if final_feature_names is not None else FEATURE_ORDER[:X.shape[1]]
+    return X, y, all_dates, all_tickers, feature_names, ret_fwd
 
 def main():
     parser = argparse.ArgumentParser(description="Train ensemble ML models")
     parser.add_argument('--out-dir', default='ml_out', help='Output directory')
     parser.add_argument('--version', default='v3', help='Model version')
     parser.add_argument('--model-type', default='ensemble',
-                       choices=['ensemble', 'stacking', 'xgboost', 'random_forest', 'logistic'],
+                       choices=['ensemble', 'stacking', 'xgboost', 'random_forest', 'logistic', 'lgbm'],
                        help='Model type to train')
     parser.add_argument('--years', type=int, default=3, help='Years of data')
     parser.add_argument('--horizon', type=int, default=20, help='Prediction horizon')
@@ -1258,11 +1947,14 @@ def main():
     print(f"Parameters: years={args.years}, horizon={args.horizon}")
 
     try:
+
+
+
         # Load tickers and build dataset
         tickers = load_tickers_from_file(args.max_tickers)
         print(f"Loading data for {len(tickers)} tickers...")
 
-        X, y, dates, tickers_row = build_dataset(tickers, args.years, args.horizon, args.label_type,
+        X, y, dates, tickers_row, feature_names, ret_fwd = build_dataset(tickers, args.years, args.horizon, args.label_type,
                                   q_low=args.q_low, q_high=args.q_high)
         print(f"Dataset built: {X.shape[0]} samples, {X.shape[1]} features")
 
@@ -1295,12 +1987,14 @@ def main():
             X, y, dates=dates, tickers=tickers_row,
             test_size=0.2, validation=args.validation,
             embargo_days=args.embargo, n_splits=args.n_splits,
-            horizon=args.horizon, out_dir=out_dir
+            horizon=args.horizon, out_dir=out_dir,
+            ret_fwd=ret_fwd
         )
 
         # Optional experiment tracking
         try:
             if args.mlflow and HAS_MLFLOW:
+                assert mlflow is not None
                 mlflow.set_experiment(os.getenv('MLFLOW_EXPERIMENT', 'stock_dashboard'))
                 with mlflow.start_run(run_name=f"{args.model_type}_{args.label_type}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"):
                     mlflow.log_params({
@@ -1325,6 +2019,7 @@ def main():
 
         try:
             if args.wandb and HAS_WANDB:
+                assert wandb is not None
                 run = wandb.init(project=os.getenv('WANDB_PROJECT', 'stock_dashboard'),
                                  name=f"{args.model_type}_{args.label_type}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
                                  config={
@@ -1371,9 +2066,11 @@ def main():
                 return {k: convert_numpy_types(v) for k, v in obj.items()}
             elif isinstance(obj, list):
                 return [convert_numpy_types(v) for v in obj]
-            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+            elif isinstance(obj, bool):
+                return obj
+            elif isinstance(obj, numbers.Integral):
                 return int(obj)
-            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+            elif isinstance(obj, numbers.Real) and not isinstance(obj, numbers.Integral):
                 return float(obj)
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
@@ -1396,7 +2093,7 @@ def main():
                 'q_low': args.q_low,
                 'q_high': args.q_high
             },
-            'features': FEATURE_ORDER[:X.shape[1]],
+            'features': feature_names,
             'timestamp': timestamp,
             'dataset_info': {
                 'n_samples': int(X.shape[0]),
@@ -1464,6 +2161,115 @@ def main():
         import traceback
         traceback.print_exc()
         raise
+
+
+
+# --- Decision rule and utility metrics helpers ---
+
+def apply_decision_rule(proba_df: pd.DataFrame, tau: float, kappa: float) -> pd.Series:
+    """Apply no-trade decision rule on probability DataFrame.
+    Trade when (p_up - p_down) >= tau AND max_prob >= kappa (BUY),
+    or (p_down - p_up) >= tau AND max_prob >= kappa (SELL). Else 0 (no trade).
+    Returns a pd.Series with values {+1: BUY, -1: SELL, 0: NO-TRADE}.
+    Expects columns: p_down, p_flat, p_up
+    """
+    df = proba_df.copy()
+    for c in ['p_down', 'p_flat', 'p_up']:
+        if c not in df.columns:
+            raise ValueError(f"Missing required column: {c}")
+    p_up = pd.to_numeric(df['p_up'], errors='coerce')
+    p_down = pd.to_numeric(df['p_down'], errors='coerce')
+    max_prob = df[['p_down', 'p_flat', 'p_up']].max(axis=1)
+    buy = ((p_up - p_down) >= float(tau)) & (max_prob >= float(kappa))
+    sell = ((p_down - p_up) >= float(tau)) & (max_prob >= float(kappa))
+    decisions = np.where(buy, 1, np.where(sell, -1, 0))
+    return pd.Series(decisions, index=df.index, name='decision')
+
+
+def compute_trade_metrics(proba_df: pd.DataFrame, tau: float, kappa: float, fee_bp: int = 5) -> Dict[str, float]:
+    """Compute utility, hit rate, trade rate, and avg return per trade using decision rule.
+    Expects columns: ret_fwd, p_down, p_flat, p_up.
+    Utility is mean(trade_ret) - fee_bp/10000.
+    """
+    df = proba_df.copy()
+    required = ['ret_fwd', 'p_down', 'p_flat', 'p_up']
+    for c in required:
+        if c not in df.columns:
+            raise ValueError(f"Missing required column: {c}")
+    # Sanitize numeric columns
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors='coerce').replace([np.inf, -np.inf], np.nan)
+    sig = apply_decision_rule(df[['p_down', 'p_flat', 'p_up']], tau, kappa)
+    ret = df['ret_fwd']
+    trade_ret = np.where(sig == 1, ret, np.where(sig == -1, -ret, np.nan))
+    trade_ret = pd.Series(trade_ret).dropna()
+    n = int(len(df))
+    n_tr = int(len(trade_ret))
+    trade_rate = float(n_tr / n) if n > 0 else 0.0
+    avg_ret = float(trade_ret.mean()) if n_tr > 0 else 0.0
+    hit_rate = float((trade_ret > 0).mean()) if n_tr > 0 else 0.0
+    fee = float(fee_bp) / 10000.0
+    utility = float(avg_ret - fee)
+    return {
+        'utility': utility,
+        'hit_rate': hit_rate,
+        'trade_rate': trade_rate,
+        'avg_return_per_trade': avg_ret,
+        'n_trades': n_tr,
+        'tau': float(tau),
+        'kappa': float(kappa),
+    }
+
+
+def find_thresholds_from_oof(oof_df: pd.DataFrame, fee_bp: int = 5) -> Dict[str, float]:
+    """Grid search thresholds (tau, kappa) on OOF predictions to maximize utility.
+    Decision rule: trade when (p_up - p_down) >= tau AND max_prob >= kappa.
+    Expects columns: ret_fwd, p_down, p_flat, p_up
+    Utility = mean(trade_ret) - fee_bp/10000, where trade_ret = ret_fwd for BUY, -ret_fwd for SELL.
+    Returns: { 'tau', 'kappa', 'utility', 'n_trades', 'win_rate', 'trade_rate', 'avg_return_per_trade' }
+    """
+    df = oof_df.copy()
+    required = ['ret_fwd', 'p_down', 'p_flat', 'p_up']
+    for c in required:
+        if c not in df.columns:
+            raise ValueError(f"Missing required OOF column: {c}")
+    taus = [0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    kappas = [0.5, 0.6, 0.7, 0.8, 0.9]
+    best = {'tau': None, 'kappa': None, 'utility': -1e9, 'n_trades': 0, 'win_rate': 0.0, 'trade_rate': 0.0, 'avg_return_per_trade': 0.0}
+    fee = float(fee_bp) / 10000.0
+    # Sanitize
+    for col in ['ret_fwd', 'p_down', 'p_flat', 'p_up']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').replace([np.inf, -np.inf], np.nan)
+    N = int(len(df))
+    for tau in taus:
+        for kappa in kappas:
+            # Decisions: +1 buy, -1 sell, 0 no-trade
+            sig = apply_decision_rule(df[['p_down', 'p_flat', 'p_up']], tau, kappa)
+            trade_ret = np.where(sig == 1, df['ret_fwd'], np.where(sig == -1, -df['ret_fwd'], np.nan))
+            trade_ret = pd.Series(trade_ret).dropna()
+            if len(trade_ret) == 0:
+                util = -fee
+                n_tr = 0
+                win = 0.0
+                tr_rate = 0.0
+                avg_ret = 0.0
+            else:
+                avg_ret = float(trade_ret.mean())
+                util = float(avg_ret - fee)
+                n_tr = int(len(trade_ret))
+                win = float((trade_ret > 0).mean())
+                tr_rate = float(n_tr / N) if N > 0 else 0.0
+            if util > best['utility']:
+                best = {
+                    'tau': float(tau),
+                    'kappa': float(kappa),
+                    'utility': util,
+                    'n_trades': n_tr,
+                    'win_rate': win,
+                    'trade_rate': tr_rate,
+                    'avg_return_per_trade': avg_ret,
+                }
+    return best
 
 if __name__ == '__main__':
     main()
