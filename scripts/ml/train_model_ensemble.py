@@ -2591,7 +2591,14 @@ def main():
 
         # Create model artifact
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
-        model_file = out_dir / f"model_{args.version}_{timestamp}_ensemble.json"
+        # Ensure repo-level models directory exists
+        repo_root = Path(__file__).resolve().parents[2]
+        models_dir = repo_root / 'ml' / 'models'
+        models_dir.mkdir(parents=True, exist_ok=True)
+        base_name = f"{args.version}_{args.model_type}_{args.label_type}_{timestamp}"
+        artifact_pkl_path = models_dir / f"ensemble_{base_name}.pkl"
+        # JSON metadata filename in repo models dir
+        model_file = models_dir / f"ensemble_{base_name}.json"
 
         # Convert numpy types to native Python types for JSON serialization
         def convert_numpy_types(obj):
@@ -2731,6 +2738,37 @@ def main():
             }
         }
 
+        # Attach threshold info if available
+        try:
+            if isinstance(results, dict):
+                if 'avg_thresholds' in results:
+                    model_metadata['avg_thresholds'] = convert_numpy_types(results['avg_thresholds'])
+                if 'fold_thresholds' in results:
+                    model_metadata['fold_thresholds'] = convert_numpy_types(results['fold_thresholds'])
+        except Exception:
+            pass
+
+        # Dump pickled model artifact for FastAPI inference
+        try:
+            if HAS_JOBLIB:
+                assert joblib is not None
+                artifact = {
+                    'model': model,
+                    'scaler': getattr(trainer, 'scaler', None),
+                    'label_encoder': getattr(trainer, 'label_encoder', None),
+                    'feature_names': feature_names,
+                    'avg_thresholds': results.get('avg_thresholds'),
+                    'timestamp': timestamp,
+                    'version': args.version,
+                    'model_type': args.model_type,
+                    'label_type': args.label_type,
+                }
+                joblib.dump(artifact, artifact_pkl_path)
+            else:
+                print("WARN: joblib not available; skipping .pkl artifact dump")
+        except Exception as e:
+            print(f"WARN: failed to save model artifact: {e}")
+
         # Save model metadata
         with open(model_file, 'w') as f:
             json.dump(model_metadata, f, indent=2)
@@ -2738,7 +2776,8 @@ def main():
         # Update latest.json
         latest_file = out_dir / 'latest.json'
         latest_data = {
-            'path': f'ml/models/{model_file.name}',
+            'json': f'ml/models/{model_file.name}',
+            'pkl': f'ml/models/{artifact_pkl_path.name}',
             'version': f'{args.version}_{timestamp}_ensemble'
         }
 
@@ -2747,7 +2786,8 @@ def main():
 
         # Print summary
         print(f"\n🎉 Training completed successfully!")
-        print(f"📁 Model saved to: {model_file}")
+        print(f"📁 Metadata JSON: {model_file}")
+        print(f"📁 Model PKL:    {artifact_pkl_path}")
         print(f"📊 Test Accuracy: {results['test_metrics']['accuracy']:.4f}")
         print(f"📊 Test AUC: {results['test_metrics']['auc']:.4f}")
         print(f"📊 Test F1: {results['test_metrics']['f1_score']:.4f}")
