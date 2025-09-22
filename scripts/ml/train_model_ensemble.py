@@ -27,6 +27,8 @@ from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier, StackingClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 
 try:
     import joblib
@@ -462,6 +464,8 @@ class EnsembleTrainer:
         self.tuner = tuner
         self.models = {}
         self.ensemble = None
+        # Global preprocessor: impute missing values once; linear models add their own scaler in a Pipeline
+        self.imputer = SimpleImputer(strategy='median')
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         self.feature_importance = {}
@@ -477,14 +481,18 @@ class EnsembleTrainer:
     def create_models(self) -> Dict[str, Any]:
         """Create individual models for ensemble with better regularization"""
         models = {
-            'logistic': LogisticRegression(
-                random_state=42,
-                max_iter=2000,
-                class_weight='balanced',
-                C=1.0,  # Regularization strength
-                penalty='l2',
-                solver='lbfgs'
-            ),
+            'logistic': Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler()),
+                ('clf', LogisticRegression(
+                    random_state=42,
+                    max_iter=2000,
+                    class_weight='balanced',
+                    C=1.0,
+                    penalty='l2',
+                    solver='lbfgs'
+                ))
+            ]),
             'random_forest': RandomForestClassifier(
                 n_estimators=50,  # Reduced to prevent overfitting
                 random_state=42,
@@ -545,9 +553,9 @@ class EnsembleTrainer:
         tscv = TimeSeriesSplit(n_splits=3)
         param_grids = {
             'logistic': {
-                'C': [0.1, 1.0, 10.0],
-                'penalty': ['l2'],
-                'solver': ['lbfgs']
+                'clf__C': [0.1, 1.0, 10.0],
+                'clf__penalty': ['l2'],
+                'clf__solver': ['lbfgs']
             },
             'random_forest': {
                 'n_estimators': [30, 50, 100],
@@ -577,16 +585,26 @@ class EnsembleTrainer:
                 'reg_alpha': [0.0, 0.1, 1.0]
             }
         if model_name in param_grids:
-            grid_search = GridSearchCV(model, param_grids[model_name],
-                                       cv=tscv, scoring='balanced_accuracy',
-                                       n_jobs=-1, verbose=0)
+            grid_search = GridSearchCV(
+                model,
+                param_grids[model_name],
+                cv=tscv,
+                scoring='balanced_accuracy',
+                n_jobs=-1,
+                verbose=2,
+                error_score='raise'
+            )
             try:
                 if sample_weight is not None:
-                    grid_search.fit(X, y, **{'sample_weight': sample_weight})
+                    if isinstance(model, Pipeline):
+                        grid_search.fit(X, y, **{'clf__sample_weight': sample_weight})
+                    else:
+                        grid_search.fit(X, y, **{'sample_weight': sample_weight})
                 else:
                     grid_search.fit(X, y)
-            except TypeError:
-                grid_search.fit(X, y)
+            except Exception as e:
+                print(f"GridSearchCV failed for {model_name}: {e}")
+                raise
             return grid_search.best_estimator_
         return model
 
@@ -617,9 +635,14 @@ class EnsembleTrainer:
             # Expanded search spaces
             if model_name == 'logistic':
                 C = trial.suggest_float('C', 1e-4, 1e3, log=True)
-                model = LogisticRegression(
-                    random_state=42, max_iter=2000, class_weight='balanced',
-                    penalty='l2', solver='lbfgs', C=C)
+                model = Pipeline(steps=[
+                    ('imputer', SimpleImputer(strategy='median')),
+                    ('scaler', StandardScaler()),
+                    ('clf', LogisticRegression(
+                        random_state=42, max_iter=2000, class_weight='balanced',
+                        penalty='l2', solver='lbfgs', C=C
+                    ))
+                ])
             elif model_name == 'random_forest':
                 n_estimators = trial.suggest_int('n_estimators', 50, 200)
                 max_depth = trial.suggest_int('max_depth', 3, 20)
@@ -738,7 +761,10 @@ class EnsembleTrainer:
                         else:
                             model.fit(X_tr, y_tr)
                 except TypeError:
-                    model.fit(X_tr, y_tr)
+                    if isinstance(model, Pipeline) and sample_weight is not None:
+                        model.fit(X_tr, y_tr, **{'clf__sample_weight': sample_weight[train_idx]})
+                    else:
+                        model.fit(X_tr, y_tr)
                 scores.append(auc_score(model, X_val, y_val))
             return float(np.mean(scores))
 
@@ -779,8 +805,14 @@ class EnsembleTrainer:
 
         # Build final model with best params
         if model_name == 'logistic':
-            best = LogisticRegression(random_state=42, max_iter=2000, class_weight='balanced',
-                                      penalty='l2', solver='lbfgs', C=best_params.get('C', 1.0))
+            best = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler()),
+                ('clf', LogisticRegression(
+                    random_state=42, max_iter=2000, class_weight='balanced',
+                    penalty='l2', solver='lbfgs', C=best_params.get('C', 1.0)
+                ))
+            ])
         elif model_name == 'random_forest':
             mf_any = best_params.get('max_features', 'sqrt')
             if isinstance(mf_any, (int, float)):
@@ -831,11 +863,17 @@ class EnsembleTrainer:
             best = base_model
         try:
             if sample_weight is not None:
-                best.fit(X, y, sample_weight=sample_weight)
+                if isinstance(best, Pipeline):
+                    best.fit(X, y, **{'clf__sample_weight': sample_weight})
+                else:
+                    best.fit(X, y, sample_weight=sample_weight)
             else:
                 best.fit(X, y)
         except TypeError:
-            best.fit(X, y)
+            if isinstance(best, Pipeline) and sample_weight is not None:
+                best.fit(X, y, **{'clf__sample_weight': sample_weight})
+            else:
+                best.fit(X, y)
         return best
 
     def train_ensemble(self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None) -> VotingClassifier:
@@ -843,8 +881,19 @@ class EnsembleTrainer:
         print("Training individual models...")
         print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
 
-        # Scale features
-        X_scaled = self.scaler.fit_transform(X)
+        # Clean and impute features (global)
+        X = np.where(np.isfinite(X), X, np.nan)
+        # Simple diagnostics for NaN/Inf per column (sample)
+        try:
+            n_cols = X.shape[1]
+            nan_counts = np.sum(np.isnan(X), axis=0)
+            inf_counts = np.sum(~np.isfinite(np.where(np.isnan(X), 0.0, X)), axis=0)
+            bad_cols = [i for i in range(n_cols) if nan_counts[i] > 0 or inf_counts[i] > 0]
+            if bad_cols:
+                print(f"Diagnostics: {len(bad_cols)} columns with NaN/Inf before imputation. Example indices: {bad_cols[:10]}")
+        except Exception:
+            pass
+        X_proc = self.imputer.fit_transform(X)
 
         # Create and tune individual models
         base_models = self.create_models()
@@ -853,18 +902,18 @@ class EnsembleTrainer:
         for name, model in base_models.items():
             print(f"Training and tuning {name}...")
             try:
-                tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model, sample_weight=sample_weight)
+                tuned_model = self.hyperparameter_tuning(X_proc, y, name, model, sample_weight=sample_weight)
                 # Probability calibration (isotonic)
                 print(f"Calibrating {name}...")
                 calibrated_model = CalibratedClassifierCV(tuned_model, method='isotonic', cv=3)
                 try:
                     if sample_weight is not None:
-                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                        calibrated_model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        calibrated_model.fit(X_scaled, y)
+                        calibrated_model.fit(X_proc, y)
                 except Exception as e:
                     print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(tuned_model).__name__}): {e}. Falling back to unweighted training.")
-                    calibrated_model.fit(X_scaled, y)
+                    calibrated_model.fit(X_proc, y)
                 tuned_models.append((name, calibrated_model))
                 self.models[name] = calibrated_model
                 print(f"✅ {name} trained and calibrated successfully")
@@ -873,21 +922,21 @@ class EnsembleTrainer:
                 # Fallback: fit default model then calibrate
                 try:
                     if sample_weight is not None:
-                        model.fit(X_scaled, y, sample_weight=sample_weight)
+                        model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        model.fit(X_scaled, y)
+                        model.fit(X_proc, y)
                 except Exception:
-                    model.fit(X_scaled, y)
+                    model.fit(X_proc, y)
                 print(f"Calibrating {name} (fallback)...")
                 calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
                 try:
                     if sample_weight is not None:
-                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                        calibrated_model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        calibrated_model.fit(X_scaled, y)
+                        calibrated_model.fit(X_proc, y)
                 except Exception as e:
                     print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(model).__name__}): {e}. Falling back to unweighted training.")
-                    calibrated_model.fit(X_scaled, y)
+                    calibrated_model.fit(X_proc, y)
                 tuned_models.append((name, calibrated_model))
                 self.models[name] = calibrated_model
                 print(f"⚠️ {name} using default parameters with calibration")
@@ -904,11 +953,11 @@ class EnsembleTrainer:
         print("Training ensemble...")
         try:
             if sample_weight is not None:
-                ensemble.fit(X_scaled, y, sample_weight=sample_weight)
+                ensemble.fit(X_proc, y, sample_weight=sample_weight)
             else:
-                ensemble.fit(X_scaled, y)
+                ensemble.fit(X_proc, y)
         except TypeError:
-            ensemble.fit(X_scaled, y)
+            ensemble.fit(X_proc, y)
         print("✅ Ensemble training completed")
 
         return ensemble
@@ -916,45 +965,56 @@ class EnsembleTrainer:
     def train_stacking(self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None) -> StackingClassifier:
         """Train stacking ensemble with LR meta-learner; supports sample_weight."""
         print("Training base models for stacking...")
-        X_scaled = self.scaler.fit_transform(X)
+        # Clean and impute features (global)
+        X = np.where(np.isfinite(X), X, np.nan)
+        try:
+            n_cols = X.shape[1]
+            nan_counts = np.sum(np.isnan(X), axis=0)
+            inf_counts = np.sum(~np.isfinite(np.where(np.isnan(X), 0.0, X)), axis=0)
+            bad_cols = [i for i in range(n_cols) if nan_counts[i] > 0 or inf_counts[i] > 0]
+            if bad_cols:
+                print(f"Diagnostics (stacking): {len(bad_cols)} columns with NaN/Inf before imputation. Example indices: {bad_cols[:10]}")
+        except Exception:
+            pass
+        X_proc = self.imputer.fit_transform(X)
         base_models = self.create_models()
         tuned_models = []
         for name, model in base_models.items():
             print(f"Training and tuning {name} (stacking)...")
             try:
-                tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model, sample_weight=sample_weight)
+                tuned_model = self.hyperparameter_tuning(X_proc, y, name, model, sample_weight=sample_weight)
                 # Probability calibration (isotonic) for stacking base estimator
                 print(f"Calibrating {name} (stacking)...")
                 calibrated_model = CalibratedClassifierCV(tuned_model, method='isotonic', cv=3)
                 try:
                     if sample_weight is not None:
-                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                        calibrated_model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        calibrated_model.fit(X_scaled, y)
+                        calibrated_model.fit(X_proc, y)
                 except Exception as e:
                     print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(tuned_model).__name__}): {e}. Falling back to unweighted training.")
-                    calibrated_model.fit(X_scaled, y)
+                    calibrated_model.fit(X_proc, y)
                 self.models[name] = calibrated_model
                 tuned_models.append((name, calibrated_model))
             except Exception as e:
                 print(f"{name} tuning failed: {e} — using default")
                 try:
                     if sample_weight is not None:
-                        model.fit(X_scaled, y, sample_weight=sample_weight)
+                        model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        model.fit(X_scaled, y)
+                        model.fit(X_proc, y)
                 except Exception:
-                    model.fit(X_scaled, y)
+                    model.fit(X_proc, y)
                 print(f"Calibrating {name} (stacking fallback)...")
                 calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
                 try:
                     if sample_weight is not None:
-                        calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
+                        calibrated_model.fit(X_proc, y, sample_weight=sample_weight)
                     else:
-                        calibrated_model.fit(X_scaled, y)
+                        calibrated_model.fit(X_proc, y)
                 except Exception as e:
                     print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(model).__name__}): {e}. Falling back to unweighted training.")
-                    calibrated_model.fit(X_scaled, y)
+                    calibrated_model.fit(X_proc, y)
                 self.models[name] = calibrated_model
                 tuned_models.append((name, calibrated_model))
         # Meta-learner with regularization and CV blending
@@ -971,11 +1031,11 @@ class EnsembleTrainer:
         print("Training stacking classifier (CV blending, passthrough=True)...")
         try:
             if sample_weight is not None:
-                stack.fit(X_scaled, y, sample_weight=sample_weight)
+                stack.fit(X_proc, y, sample_weight=sample_weight)
             else:
-                stack.fit(X_scaled, y)
+                stack.fit(X_proc, y)
         except TypeError:
-            stack.fit(X_scaled, y)
+            stack.fit(X_proc, y)
         print("✅ Stacking training completed")
         return stack
 
@@ -1033,26 +1093,27 @@ class EnsembleTrainer:
             f1_score, classification_report, confusion_matrix, balanced_accuracy_score, matthews_corrcoef
         )
 
-        # Scale features if needed
-        if hasattr(self, 'scaler') and self.scaler is not None:
-            X_scaled = self.scaler.transform(X)
-        else:
-            X_scaled = X
+        # Preprocess features for evaluation: replace infs, impute
+        Xv = np.where(np.isfinite(X), X, np.nan)
+        try:
+            Xv = self.imputer.transform(Xv)
+        except Exception:
+            pass
 
         y_pred_proba = None
         try:
-            y_pred_proba = model.predict_proba(X_scaled)
+            y_pred_proba = model.predict_proba(Xv)
         except Exception:
             y_pred_proba = None
 
         # Default predictions via model.predict (argmax inside estimator)
         try:
-            y_pred_encoded = model.predict(X_scaled)
+            y_pred_encoded = model.predict(Xv)
         except Exception:
             y_pred_encoded = None
 
         # Initialize y_pred to satisfy type checkers; will be overridden below
-        y_pred: Any = (y_pred_encoded if y_pred_encoded is not None else np.zeros(len(X_scaled)))
+        y_pred: Any = (y_pred_encoded if y_pred_encoded is not None else np.zeros(Xv.shape[0]))
         used_thresholds = False
         if thresholds is not None and y_pred_proba is not None:
             try:
@@ -1118,7 +1179,7 @@ class EnsembleTrainer:
         if not used_thresholds:
             # Fallback to estimator predictions
             if y_pred_encoded is None:
-                y_pred = np.zeros(len(X_scaled))
+                y_pred = np.zeros(Xv.shape[0])
             else:
                 if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
                     try:
@@ -1408,14 +1469,15 @@ class EnsembleTrainer:
 
             # Compute probabilities for threshold search
             try:
-                X_test_scaled = self.scaler.transform(X_test)
+                X_test_v = np.where(np.isfinite(X_test), X_test, np.nan)
+                X_test_v = self.imputer.transform(X_test_v)
             except Exception:
-                X_test_scaled = X_test
+                X_test_v = X_test
             y_proba = None
             classes_model = None
             try:
                 if hasattr(model_i, 'predict_proba'):
-                    y_proba = model_i.predict_proba(X_test_scaled)
+                    y_proba = model_i.predict_proba(X_test_v)
                     classes_model = getattr(model_i, 'classes_', None)
             except Exception:
                 y_proba = None
@@ -2375,11 +2437,14 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
         if final_feature_names is None:
             final_feature_names = current_features
 
-        feature_data = df_features[current_features]
-        feature_data = feature_data.dropna(how='all').ffill().bfill()
+        feature_data = df_features[current_features].replace([np.inf, -np.inf], np.nan)
+        # Drop initial warm-up rows where rolling windows aren't filled (avoid leakage from back/forward-fill)
+        warmup = 252
+        feature_data = feature_data.iloc[warmup:]
         label_data = labels.loc[feature_data.index]
         valid_mask = label_data.notna()
         feature_data = feature_data[valid_mask]
+        label_data = label_data[valid_mask]
         # Compute aligned forward returns for OOF logging
         future_returns_full = df_features['Close'].shift(-horizon) / df_features['Close'] - 1
         ret_data = future_returns_full.loc[feature_data.index][valid_mask].values
@@ -2754,6 +2819,7 @@ def main():
                 assert joblib is not None
                 artifact = {
                     'model': model,
+                    'imputer': getattr(trainer, 'imputer', None),
                     'scaler': getattr(trainer, 'scaler', None),
                     'label_encoder': getattr(trainer, 'label_encoder', None),
                     'feature_names': feature_names,
