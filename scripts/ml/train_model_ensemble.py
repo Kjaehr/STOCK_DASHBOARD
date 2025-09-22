@@ -32,6 +32,7 @@ try:
     import joblib
     HAS_JOBLIB = True
 except Exception:
+    joblib = None  # type: ignore[assignment]
     HAS_JOBLIB = False
 
 mlflow = None
@@ -76,6 +77,21 @@ except ImportError:
 # Backward-compat alias for requested flag name
 HAS_LGBM = HAS_LIGHTGBM
 
+def clean_lgbm_params(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize LightGBM params to avoid alias warnings and set safe defaults.
+    - Remove colsample_bytree/subsample in favor of feature_fraction/bagging_fraction
+    - Ensure bagging_freq=1 and reasonable defaults if missing
+    """
+    p = dict(p)
+    # Remove XGBoost-style aliases if present (LGBM warns otherwise)
+    p.pop('colsample_bytree', None)
+    p.pop('subsample', None)
+    # Set sensible defaults if missing
+    p.setdefault('feature_fraction', 0.7)
+    p.setdefault('bagging_fraction', 0.8)
+    p.setdefault('bagging_freq', 1)
+    return p
+
 shap = None
 try:
     import shap  # type: ignore
@@ -108,6 +124,155 @@ SESSION.headers.update({
     'Accept-Language': 'en-US,en;q=0.5',
     'Connection': 'keep-alive',
 })
+
+# --- Data Quality & Leakage Control helpers ---
+
+def _check_suspicious_feature_names(feature_names: List[str]) -> None:
+    """Strict check for forward-looking feature names.
+    Raises ValueError with actionable guidance when suspicious names are found.
+    """
+    try:
+        import re as _re
+    except Exception:
+        _re = None  # type: ignore
+    suspicious: List[str] = []
+    # Expanded patterns covering common leakage indicators
+    patterns = [
+        r"(ret|return).*?(fwd|forward|lead|t\+\d+)",
+        r"^(fwd_|future_|next_)",
+        r"_(fwd|lead|t\+\d+)$",
+        r"(y_next|y\+\d+|target|label)",
+        r"future_(max|min|ret)",
+        r"(max|min)_future",
+    ]
+    for n in feature_names:
+        s = str(n)
+        for p in patterns:
+            if (_re.search(p, s, flags=_re.IGNORECASE) if _re else (p.lower() in s.lower())):
+                suspicious.append(s)
+                break
+    if suspicious:
+        hint = (
+            "Remove forward-looking columns (e.g., future_*, *_fwd, next_*), and ensure features are built "
+            "only from information available at or before t-1. Avoid joining label targets back into features."
+        )
+        raise ValueError(
+            f"Temporal leakage detected in feature names: {suspicious[:10]}. {hint}"
+        )
+
+
+def _assert_purged_no_overlap(
+    date_ser: "pd.Series",
+    tick_ser: Optional["pd.Series"],
+    test_mask: "pd.Series",
+    train_mask: "pd.Series",
+    emb_left: "pd.Timestamp",
+    emb_right: "pd.Timestamp",
+) -> None:
+    """Assert that training rows do not fall inside the embargo window around the test period.
+    If tickers are provided, enforce the purge per ticker; otherwise enforce globally.
+    """
+    import numpy as _np
+    import pandas as _pd
+    in_window = (date_ser >= emb_left) & (date_ser <= emb_right)
+    if tick_ser is not None:
+        viol_total = 0
+        test_tickers = _pd.Series(tick_ser[test_mask]).unique()
+        for t in test_tickers:
+            t_mask = (tick_ser == t)
+            viol_total += int(_np.sum((_pd.Series(train_mask).values.astype(bool)) & t_mask.values & in_window.values))
+        if viol_total > 0:
+            raise AssertionError(f"Purged CV violation: {viol_total} training rows within embargo window [{emb_left}, {emb_right}] for test tickers")
+    else:
+        viol = int(_np.sum((_pd.Series(train_mask).values.astype(bool)) & in_window.values))
+        if viol > 0:
+            raise AssertionError(f"Purged CV violation: {viol} training rows within embargo window [{emb_left}, {emb_right}]")
+
+
+
+
+def _compute_dynamic_embargo_bars(
+    feature_names: Optional[List[str]],
+    X: np.ndarray,
+    mask_test: np.ndarray,
+    horizon: int,
+    dynamic_horizon_k: Optional[float]
+) -> Optional[int]:
+    """Compute a per-fold dynamic embargo (in bars) based on ATR20-normalized horizon.
+    Returns the 90th percentile of per-sample expected bars-to-target for the test fold.
+    If ATR-like columns are unavailable or k is None, returns None.
+    """
+    try:
+        if dynamic_horizon_k is None or feature_names is None or X is None or mask_test is None:
+            return None
+        # Prefer absolute ATR if present; otherwise, use atr_pct
+        col_idx = None
+        use_pct = False
+        if 'atr' in feature_names:
+            col_idx = feature_names.index('atr')
+        elif 'atr_pct' in feature_names:
+            col_idx = feature_names.index('atr_pct')
+            use_pct = True
+        else:
+            return None
+        vals_all = X[:, col_idx].astype(float)
+        vals_test = X[mask_test, col_idx].astype(float)
+        # Robust median for normalization
+        med = np.nanmedian(vals_all)
+        if not np.isfinite(med) or med <= 0:
+            # Fallback: use 1.0 to avoid division errors
+            med = 1.0
+        scale_test = vals_test / med if med != 0 else vals_test
+        # Expected bars capped to a sensible range
+        bars = np.round(float(horizon) * float(dynamic_horizon_k) * scale_test).astype(int)
+        bars = np.clip(bars, 5, 60)
+        bars = bars[np.isfinite(bars)]
+        if bars.size == 0:
+            return None
+        p90 = int(np.percentile(bars, 90))
+        return max(1, int(p90))
+    except Exception:
+        return None
+
+def _try_audit_survivorship(date_ser: "pd.Series", tickers: Optional[List[str]]) -> None:
+    """Best-effort survivorship bias audit: if a security master exists, verify sampled rows.
+    Expects a CSV at DATA_DIR/security_master.csv with columns: ticker,start_date,end_date (optional).
+    Only logs warnings; does not raise.
+    """
+    if tickers is None or len(tickers) != len(date_ser):
+        return
+    import pandas as _pd
+    from pathlib import Path as _Path
+    sm_path = DATA_DIR / "security_master.csv"
+    if not _Path(sm_path).exists():
+        return
+    try:
+        sm = _pd.read_csv(sm_path)
+        if sm.empty or "ticker" not in sm.columns:
+            return
+        sm = sm.copy()
+        if "start_date" in sm.columns:
+            sm["start_date"] = _pd.to_datetime(sm["start_date"], errors="coerce")
+        if "end_date" in sm.columns:
+            sm["end_date"] = _pd.to_datetime(sm["end_date"], errors="coerce")
+        df = _pd.DataFrame({"date": _pd.to_datetime(date_ser.values), "ticker": list(tickers)})
+        # Sample to keep it light
+        df = df.sample(min(len(df), 500), random_state=42)
+        merged = df.merge(sm[[c for c in ["ticker", "start_date", "end_date"] if c in sm.columns]], on="ticker", how="left")
+        if "start_date" not in merged.columns:
+            return
+        # Build an end column robustly (if missing, allow through by using max date)
+        if "end_date" in merged.columns:
+            end_col = merged["end_date"].copy()
+            end_col = end_col.fillna(merged["date"].max())
+        else:
+            end_col = _pd.Series([merged["date"].max()] * len(merged), index=merged.index)
+        alive = (merged["date"] >= merged["start_date"]) & (merged["date"] <= end_col)
+        violations = int((~alive).sum())
+        if violations > 0:
+            print(f"WARN: Survivorship audit: {violations} sampled rows fall outside ticker listing window. Check your universe construction.")
+    except Exception as e:
+        print(f"WARN: Survivorship audit skipped due to error: {e}")
 
 # Enhanced feature set
 FEATURE_ORDER = [
@@ -305,6 +470,8 @@ class EnsembleTrainer:
         self.optuna_timeout: Optional[int] = None
         self.stacking_cv_splits: int = 3
         self.meta_C: float = 0.5
+        # Threshold optimization metric: 'balanced_accuracy' or 'mcc'
+        self.threshold_metric: str = 'balanced_accuracy'
 
 
     def create_models(self) -> Dict[str, Any]:
@@ -347,7 +514,7 @@ class EnsembleTrainer:
 
         if HAS_LIGHTGBM:
             assert LGBMClassifier is not None
-            models['lgbm'] = LGBMClassifier(
+            _p = dict(
                 random_state=42,
                 n_estimators=100,
                 learning_rate=0.05,
@@ -359,6 +526,8 @@ class EnsembleTrainer:
                 class_weight='balanced',
                 n_jobs=-1
             )
+            _p = clean_lgbm_params(_p)
+            models['lgbm'] = LGBMClassifier(**_p)
 
         return models
 
@@ -409,7 +578,7 @@ class EnsembleTrainer:
             }
         if model_name in param_grids:
             grid_search = GridSearchCV(model, param_grids[model_name],
-                                       cv=tscv, scoring='roc_auc_ovr',
+                                       cv=tscv, scoring='balanced_accuracy',
                                        n_jobs=-1, verbose=0)
             try:
                 if sample_weight is not None:
@@ -439,13 +608,10 @@ class EnsembleTrainer:
                 pruner = None
                 print("Optuna: No pruner available; proceeding without pruning")
 
+        from sklearn.metrics import balanced_accuracy_score as _ba
         def auc_score(estimator, X_val, y_val):
-            try:
-                proba = estimator.predict_proba(X_val)
-                return float(roc_auc_score(y_val, proba, multi_class='ovr'))
-            except Exception:
-                preds = estimator.predict(X_val)
-                return float(accuracy_score(y_val, preds))
+            preds = estimator.predict(X_val)
+            return float(_ba(y_val, preds))
 
         def objective(trial: 'OptunaTrial') -> float:
             # Expanded search spaces
@@ -498,7 +664,7 @@ class EnsembleTrainer:
                 reg_alpha = trial.suggest_float('reg_alpha', 0.0, 5.0)
                 reg_lambda = trial.suggest_float('reg_lambda', 0.0, 10.0)
                 assert LGBMClassifier is not None
-                model = LGBMClassifier(
+                _p = dict(
                     random_state=42,
                     n_estimators=n_estimators,
                     learning_rate=learning_rate,
@@ -511,6 +677,8 @@ class EnsembleTrainer:
                     class_weight='balanced',
                     n_jobs=-1
                 )
+                _p = clean_lgbm_params(_p)
+                model = LGBMClassifier(**_p)
             else:
                 model = base_model
 
@@ -540,21 +708,27 @@ class EnsembleTrainer:
                             fit_kwargs['sample_weight'] = sample_weight[train_idx]
                         model.fit(X_tr, y_tr, **fit_kwargs)
                     elif model_name == 'lgbm' and HAS_LIGHTGBM:
-                        fit_kwargs = {'eval_set': [(X_val, y_val)], 'verbose': False}
-                        # Early stopping for LightGBM
+                        # Setup eval set and metric; prefer multi_logloss for multiclass
+                        n_cls = int(len(np.unique(y_tr)))
+                        eval_metric = 'multi_logloss' if n_cls > 2 else 'logloss'
+                        fit_kwargs = {'eval_set': [(X_val, y_val)], 'verbose': False, 'eval_metric': eval_metric}
+                        # Try to enable Optuna pruning; if unavailable, use robust early stopping
+                        pruning_attached = False
                         try:
-                            fit_kwargs['early_stopping_rounds'] = 50
+                            # Try official integration
+                            from optuna.integration import LightGBMPruningCallback as _LGBPC  # type: ignore
+                            fit_kwargs['callbacks'] = [ _LGBPC(trial, f'valid_0-{eval_metric}') ]
+                            pruning_attached = True
                         except Exception:
-                            pass
-                        # Try to import LightGBMPruningCallback to log availability
-                        try:
-                            import importlib
-                            integ = importlib.import_module('optuna.integration')
-                            lgb_cb = getattr(integ, 'LightGBMPruningCallback', None)
-                            if lgb_cb is None:
-                                print("WARN: LightGBMPruningCallback not found in optuna.integration. Training without pruning.")
-                        except Exception as e:
-                            print(f"WARN: LightGBMPruningCallback import failed: {e}. Training without pruning.")
+                            try:
+                                # Try legacy optuna_integration package
+                                from optuna_integration import LightGBMPruningCallback as _LGBPC  # type: ignore
+                                fit_kwargs['callbacks'] = [ _LGBPC(trial, f'valid_0-{eval_metric}') ]
+                                pruning_attached = True
+                            except Exception as e:
+                                print(f"WARN: LightGBMPruningCallback not available ({e}). Using early_stopping_rounds=200 without pruning.")
+                        if not pruning_attached:
+                            fit_kwargs['early_stopping_rounds'] = 200
                         if sample_weight is not None:
                             fit_kwargs['sample_weight'] = sample_weight[train_idx]
                         model.fit(X_tr, y_tr, **fit_kwargs)
@@ -638,7 +812,7 @@ class EnsembleTrainer:
                 eval_metric='logloss')
         elif model_name == 'lgbm' and HAS_LIGHTGBM:
             assert LGBMClassifier is not None
-            best = LGBMClassifier(
+            _p = dict(
                 random_state=42,
                 n_estimators=(refit_estimators if refit_estimators is not None else best_params.get('n_estimators', 200)),
                 learning_rate=best_params.get('learning_rate', 0.05),
@@ -651,6 +825,8 @@ class EnsembleTrainer:
                 class_weight='balanced',
                 n_jobs=-1
             )
+            _p = clean_lgbm_params(_p)
+            best = LGBMClassifier(**_p)
         else:
             best = base_model
         try:
@@ -844,10 +1020,18 @@ class EnsembleTrainer:
         return importance_dict
 
     def evaluate_model(self, model: Any, X: np.ndarray, y: np.ndarray,
-                      model_name: str = "model") -> Dict[str, Any]:
-        """Evaluate model performance with comprehensive metrics"""
-        from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                                   f1_score, classification_report, confusion_matrix)
+                      model_name: str = "model",
+                      thresholds: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Evaluate model performance with comprehensive metrics.
+        If `thresholds` is provided and predict_proba is available, use threshold-based
+        decisioning instead of plain argmax.
+        - Binary: {'binary_threshold': float}
+        - Trinary: {'tau': float, 'kappa': float} applied on aggregated DOWN/FLAT/UP probs
+        """
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score,
+            f1_score, classification_report, confusion_matrix, balanced_accuracy_score, matthews_corrcoef
+        )
 
         # Scale features if needed
         if hasattr(self, 'scaler') and self.scaler is not None:
@@ -855,41 +1039,119 @@ class EnsembleTrainer:
         else:
             X_scaled = X
 
-        # Predictions (model predicts encoded labels)
-        y_pred_encoded = model.predict(X_scaled)
         y_pred_proba = None
-
         try:
             y_pred_proba = model.predict_proba(X_scaled)
-        except:
-            pass
+        except Exception:
+            y_pred_proba = None
 
-        # Convert predictions back to original labels (if label encoder exists)
-        if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+        # Default predictions via model.predict (argmax inside estimator)
+        try:
+            y_pred_encoded = model.predict(X_scaled)
+        except Exception:
+            y_pred_encoded = None
+
+        # Initialize y_pred to satisfy type checkers; will be overridden below
+        y_pred: Any = (y_pred_encoded if y_pred_encoded is not None else np.zeros(len(X_scaled)))
+        used_thresholds = False
+        if thresholds is not None and y_pred_proba is not None:
             try:
-                y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
+                # Helper to map proba columns to names
+                classes_model = getattr(model, 'classes_', None)
+                if classes_model is not None and hasattr(self.label_encoder, 'inverse_transform'):
+                    try:
+                        class_labels = self.label_encoder.inverse_transform(np.array(classes_model, dtype=int))
+                    except Exception:
+                        class_labels = np.array(classes_model)
+                else:
+                    yp = np.asarray(y_pred_proba)
+                    n_classes = yp.shape[1] if yp.ndim >= 2 else 2
+                    class_labels = np.arange(n_classes)
+
+                def _sanitize(lbl: Any) -> str:
+                    s = str(lbl).lower()
+                    import re as _re
+                    s = _re.sub(r'[^a-z0-9]+', '_', s).strip('_')
+                    return f'p_{s}'
+
+                proba_cols = [_sanitize(lbl) for lbl in class_labels]
+                import pandas as _pd
+                proba_df = _pd.DataFrame(y_pred_proba, columns=proba_cols)
+
+                # Binary thresholding
+                if 'binary_threshold' in thresholds and len(proba_cols) == 2:
+                    thr = float(thresholds['binary_threshold'])
+                    # Use class '1' column if present, else the second column
+                    try:
+                        idx_pos = int(np.where(np.array(classes_model) == 1)[0][0]) if classes_model is not None else 1
+                    except Exception:
+                        idx_pos = 1
+                    y_pred_bin = (np.asarray(y_pred_proba)[:, idx_pos] >= thr).astype(int)
+                    if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                        try:
+                            y_pred = self.label_encoder.inverse_transform(y_pred_bin)
+                        except Exception:
+                            y_pred = y_pred_bin
+                    else:
+                        y_pred = y_pred_bin
+                    used_thresholds = True
+                # Trinary decision rule thresholding
+                elif ('tau' in thresholds and 'kappa' in thresholds):
+                    try:
+                        tri = _canonicalize_tri_proba(proba_df)
+                        p_down = tri['p_down']
+                        p_up = tri['p_up']
+                        tau = float(thresholds['tau'])
+                        kappa = float(thresholds['kappa'])
+                        max_prob = tri[['p_down', 'p_flat', 'p_up']].max(axis=1)
+                        buy = ((p_up - p_down) >= tau) & (max_prob >= kappa)
+                        sell = ((p_down - p_up) >= tau) & (max_prob >= kappa)
+                        y_pred = np.where(buy, 'UP', np.where(sell, 'DOWN', 'FLAT'))
+                        used_thresholds = True
+                    except Exception:
+                        used_thresholds = False
+                else:
+                    used_thresholds = False
             except Exception:
-                y_pred = y_pred_encoded
-        else:
-            y_pred = y_pred_encoded
+                used_thresholds = False
+
+        if not used_thresholds:
+            # Fallback to estimator predictions
+            if y_pred_encoded is None:
+                y_pred = np.zeros(len(X_scaled))
+            else:
+                if hasattr(self, 'label_encoder') and hasattr(self.label_encoder, 'classes_'):
+                    try:
+                        y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
+                    except Exception:
+                        y_pred = y_pred_encoded
+                else:
+                    y_pred = y_pred_encoded
 
         # Basic metrics
         accuracy = accuracy_score(y, y_pred)
+        balanced_acc = balanced_accuracy_score(y, y_pred)
+        try:
+            mcc = matthews_corrcoef(y, y_pred)
+        except Exception:
+            mcc = 0.0
 
         # Handle multiclass metrics
         avg_method = 'weighted' if len(np.unique(y)) > 2 else 'binary'
         precision = precision_score(y, y_pred, average=avg_method, zero_division=0)
         recall = recall_score(y, y_pred, average=avg_method, zero_division=0)
         f1 = f1_score(y, y_pred, average=avg_method, zero_division=0)
-        # Macro-averaged F1 for balanced view across classes
         f1_macro = f1_score(y, y_pred, average='macro', zero_division=0)
 
         metrics: Dict[str, Any] = {
             'accuracy': float(accuracy),
+            'balanced_accuracy': float(balanced_acc),
+            'mcc': float(mcc),
             'precision': float(precision),
             'recall': float(recall),
             'f1_score': float(f1),
             'f1_macro': float(f1_macro),
+            'thresholds_applied': bool(used_thresholds),
         }
 
         # AUC for multiclass (if probabilities available)
@@ -927,12 +1189,14 @@ class EnsembleTrainer:
                         pass
                 if briers:
                     metrics['brier_score_mean'] = float(np.mean(briers))
-        except Exception as _e:
+        except Exception:
             pass
 
         # Print detailed results
         print(f"\n📊 {model_name} Performance:")
         print(f"  Accuracy:   {accuracy:.4f}")
+        print(f"  Balanced A.:{balanced_acc:.4f}")
+        print(f"  MCC:        {metrics.get('mcc', 0.0):.4f}")
         print(f"  Precision:  {precision:.4f}")
         print(f"  Recall:     {recall:.4f}")
         print(f"  F1 (weighted): {f1:.4f}")
@@ -950,7 +1214,6 @@ class EnsembleTrainer:
                 report_dict_any = classification_report(y, y_pred, output_dict=True, zero_division=0)
                 report_dict: Dict[str, Any] = cast(Dict[str, Any], report_dict_any)
                 metrics['per_class'] = report_dict
-                # Extract STRONG_UP and STRONG_DOWN precision/recall if present
                 try:
                     su_any = report_dict.get('STRONG_UP', {})
                     sd_any = report_dict.get('STRONG_DOWN', {})
@@ -960,15 +1223,12 @@ class EnsembleTrainer:
                     metrics['recall_STRONG_UP'] = float(su.get('recall', 0.0))
                     metrics['precision_STRONG_DOWN'] = float(sd.get('precision', 0.0))
                     metrics['recall_STRONG_DOWN'] = float(sd.get('recall', 0.0))
-                    # Console preview
                     if su or sd:
                         print("Key class metrics:")
                         print(f"  STRONG_UP   -> P: {metrics['precision_STRONG_UP']:.4f}, R: {metrics['recall_STRONG_UP']:.4f}")
                         print(f"  STRONG_DOWN -> P: {metrics['precision_STRONG_DOWN']:.4f}, R: {metrics['recall_STRONG_DOWN']:.4f}")
                 except Exception:
                     pass
-
-
             except Exception:
                 pass
         except Exception as e:
@@ -995,6 +1255,9 @@ class EnsembleTrainer:
         out_dir: Optional[Path] = None,
         ret_fwd: Optional[np.ndarray] = None,
         feature_names: Optional[List[str]] = None,
+        dynamic_horizon_k: Optional[float] = None,
+        dynamic_embargo: Optional[bool] = None,
+        allow_suspicious_features: bool = False,
     ) -> Tuple[Any, Dict[str, Any]]:
         """Train and evaluate with 'simple' or 'purged' validation.
         Returns (model, results) where results contains train/test metrics and importance.
@@ -1013,6 +1276,18 @@ class EnsembleTrainer:
             except Exception:
                 return None
 
+        # Target alignment audit (feature name hygiene)
+        if feature_names is not None:
+            if not allow_suspicious_features:
+                # Enforce fail-fast on suspicious names
+                _check_suspicious_feature_names(list(feature_names))
+            else:
+                # Allow override for debugging but still warn
+                try:
+                    _check_suspicious_feature_names(list(feature_names))
+                except Exception as e:
+                    print(f"WARN: Temporal leakage guard overridden (--allow-suspicious-features): {e}")
+
         # Simple time split
         if validation != 'purged' or dates is None:
             split_idx = int(len(X) * (1 - test_size))
@@ -1027,13 +1302,15 @@ class EnsembleTrainer:
             train_metrics = self.evaluate_model(model, X_train, y_train_orig, "Training Set")
             test_metrics = self.evaluate_model(model, X_test, y_test_orig, "Test Set")
 
-            fnames = feature_names if feature_names is not None else FEATURE_ORDER[:X.shape[1]]
+            assert feature_names is not None, "feature_names must be provided from build_dataset"
+            fnames = list(feature_names)
             importance = self.calculate_feature_importance(X_train, fnames)
 
             results: Dict[str, Any] = {
                 'train_metrics': train_metrics,
                 'test_metrics': test_metrics,
                 'feature_importance': importance,
+                'feature_names': fnames,
                 'model': model,
                 'label_encoder': self.label_encoder,
                 'validation': 'simple',
@@ -1046,10 +1323,25 @@ class EnsembleTrainer:
         uniq_dates = sorted(date_ser.dropna().unique())
         if len(uniq_dates) < n_splits + 1:
             n_splits = max(1, min(2, len(uniq_dates) - 1))
+        # Survivorship bias mitigation audit (if security_master is available)
+        try:
+            _try_audit_survivorship(date_ser, tickers)
+        except Exception as _e:
+            print(f"WARN: Survivorship audit skipped: {_e}")
+
         date_chunks = np.array_split(np.asarray(uniq_dates), n_splits)
+        meta_X_parts: List[np.ndarray] = []
+        meta_y_parts: List[int] = []
+        # Determine if this task is truly trinary (DOWN/FLAT/UP)
+        classes_upper = set(str(c).upper() for c in np.unique(y))
+        is_trinary = classes_upper.issuperset({'DOWN', 'FLAT', 'UP'}) and len(classes_upper) == 3
+        fold_thresholds: List[Dict[str, Any]] = []
+
 
         fold_metrics: List[Dict[str, Any]] = []
         last_model: Any = None
+        fold_embargo_bars: List[int] = []
+
         oof_parts: List[pd.DataFrame] = []
         fold_idx = 0
 
@@ -1059,12 +1351,36 @@ class EnsembleTrainer:
             test_start = test_dates[0]
             test_end = test_dates[-1]
             horizon_days = int(horizon)
-            emb_left = test_start - _pd.Timedelta(days=int(embargo_days + horizon_days))
-            emb_right = test_end + _pd.Timedelta(days=int(embargo_days))
 
+            # Define test mask first (used for dynamic embargo computation)
             test_mask = (date_ser >= test_start) & (date_ser <= test_end)
+
+            # Dynamic ATR20-normalized embargo (per-fold 90th percentile of expected bars)
+            emb_bars = None
+            dyn_enabled = (dynamic_embargo if dynamic_embargo is not None else (dynamic_horizon_k is not None))
+            if dyn_enabled:
+                try:
+                    emb_bars = _compute_dynamic_embargo_bars(
+                        feature_names=list(feature_names) if feature_names is not None else None,
+                        X=X,
+                        mask_test=cast(np.ndarray, np.asarray(test_mask.values, dtype=bool)),
+                        horizon=horizon,
+                        dynamic_horizon_k=dynamic_horizon_k
+                    )
+                except Exception:
+                    emb_bars = None
+            _emb_this = int(emb_bars) if emb_bars is not None else int(embargo_days)
+            emb_left = test_start - _pd.Timedelta(days=int(_emb_this + horizon_days))
+            # Record per-fold embargo bars actually applied
+            try:
+                fold_embargo_bars.append(int(_emb_this))
+            except Exception:
+                pass
+
+            emb_right = test_end + _pd.Timedelta(days=int(_emb_this))
             train_mask = _pd.Series(True, index=date_ser.index)
             tick_ser = _pd.Series(tickers) if tickers is not None and len(tickers) == len(date_ser) else None
+
             if tick_ser is not None:
                 for t in tick_ser[test_mask].unique():
                     t_mask = (tick_ser == t)
@@ -1075,6 +1391,10 @@ class EnsembleTrainer:
 
             mask_train = cast(np.ndarray, np.asarray(train_mask.values, dtype=bool))
             mask_test = cast(np.ndarray, np.asarray(test_mask.values, dtype=bool))
+
+            # Strict purged CV overlap check (no train rows inside embargo windows)
+            _assert_purged_no_overlap(date_ser, tick_ser, _pd.Series(test_mask), _pd.Series(train_mask), emb_left, emb_right)
+
             X_train, X_test = X[mask_train], X[mask_test]
             y_train_enc = cast(np.ndarray, y_encoded[mask_train])
             y_test_enc = cast(np.ndarray, y_encoded[mask_test])
@@ -1085,48 +1405,132 @@ class EnsembleTrainer:
             sw = make_sample_weight(y_train_enc)
             model_i = self.train_model(X_train, y_train_enc, sample_weight=sw)
             last_model = model_i
-            m = self.evaluate_model(model_i, X_test, y_test_orig, "Purged Fold")
-            fold_metrics.append(m)
 
-            # Collect out-of-fold predictions with adaptive probability columns
+            # Compute probabilities for threshold search
             try:
-                if hasattr(model_i, 'predict_proba') and out_dir is not None:
-                    X_test_scaled = self.scaler.transform(X_test)
+                X_test_scaled = self.scaler.transform(X_test)
+            except Exception:
+                X_test_scaled = X_test
+            y_proba = None
+            classes_model = None
+            try:
+                if hasattr(model_i, 'predict_proba'):
                     y_proba = model_i.predict_proba(X_test_scaled)
                     classes_model = getattr(model_i, 'classes_', None)
-                    if classes_model is not None and hasattr(self.label_encoder, 'inverse_transform'):
-                        try:
-                            class_labels = self.label_encoder.inverse_transform(np.array(classes_model, dtype=int))
-                        except Exception:
-                            class_labels = np.array(classes_model)
-                    else:
-                        yp = np.asarray(y_proba)
-                        n_classes = yp.shape[1] if yp.ndim >= 2 else (len(getattr(model_i, 'classes_', [])) or 2)
-                        class_labels = np.arange(n_classes)
+            except Exception:
+                y_proba = None
 
-                    # Build probability columns matching actual classes
-                    def _sanitize(lbl: Any) -> str:
-                        s = str(lbl).lower()
-                        s = re.sub(r'[^a-z0-9]+', '_', s).strip('_')
-                        return f'p_{s}'
-
-                    proba_cols = [_sanitize(lbl) for lbl in class_labels]
-                    df_fold = pd.DataFrame(y_proba, columns=proba_cols)
-                    df_fold['y_true'] = list(y_test_orig)
-                    if ret_fwd is not None and len(ret_fwd) == len(y):
-                        df_fold['ret_fwd'] = list(ret_fwd[mask_test])
-                    # Add identifiers
-                    df_fold['date'] = list(date_ser[mask_test].astype('datetime64[ns]'))
-                    if tick_ser is not None:
-                        df_fold['ticker'] = list(tick_ser[mask_test])
-                    df_fold['fold'] = int(fold_idx + 1)
-
-                    # Save per-fold OOF and accumulate
+            # Build probability columns matching actual classes if available
+            df_fold = None
+            proba_cols: List[str] = []
+            class_labels: Any = None
+            if y_proba is not None:
+                if classes_model is not None and hasattr(self.label_encoder, 'inverse_transform'):
                     try:
-                        df_fold.to_csv(Path(out_dir) / f'fold_{fold_idx + 1}_oof.csv', index=False)
+                        class_labels = self.label_encoder.inverse_transform(np.array(classes_model, dtype=int))
                     except Exception:
-                        pass
+                        class_labels = np.array(classes_model)
+                else:
+                    yp = np.asarray(y_proba)
+                    n_classes = yp.shape[1] if yp.ndim >= 2 else (len(getattr(model_i, 'classes_', [])) or 2)
+                    class_labels = np.arange(n_classes)
+                def _sanitize(lbl: Any) -> str:
+                    s = str(lbl).lower()
+                    s = re.sub(r'[^a-z0-9]+', '_', s).strip('_')
+                    return f'p_{s}'
+                proba_cols = [_sanitize(lbl) for lbl in class_labels]
+                df_fold = pd.DataFrame(y_proba, columns=proba_cols)
+                df_fold['y_true'] = list(y_test_orig)
+                if ret_fwd is not None and len(ret_fwd) == len(y):
+                    df_fold['ret_fwd'] = list(ret_fwd[mask_test])
+                df_fold['date'] = list(date_ser[mask_test].astype('datetime64[ns]'))
+                if tick_ser is not None:
+                    df_fold['ticker'] = list(tick_ser[mask_test])
+                df_fold['fold'] = int(fold_idx + 1)
+
+            # Per-fold threshold search
+            best_thresholds_fold: Optional[Dict[str, Any]] = None
+            metric_choice = str(getattr(self, 'threshold_metric', 'balanced_accuracy')).lower()
+            try:
+                from sklearn.metrics import balanced_accuracy_score as _ba, matthews_corrcoef as _mcc
+                if y_proba is not None and is_trinary and df_fold is not None and len(proba_cols) >= 3:
+                    tri = _canonicalize_tri_proba(df_fold[proba_cols])
+                    y_true_tri = [str(v).upper() for v in list(y_test_orig)]
+                    taus = [round(x, 2) for x in np.arange(0.05, 0.55, 0.05)]
+                    kappas = [round(x, 2) for x in np.arange(0.10, 0.95, 0.05)]
+                    best_val = -1e9
+                    best_tau, best_kappa = None, None
+                    p_down = pd.to_numeric(tri['p_down'], errors='coerce')
+                    p_up = pd.to_numeric(tri['p_up'], errors='coerce')
+                    max_prob = tri[['p_down', 'p_flat', 'p_up']].max(axis=1)
+                    for tau in taus:
+                        for kappa in kappas:
+                            buy = ((p_up - p_down) >= float(tau)) & (max_prob >= float(kappa))
+                            sell = ((p_down - p_up) >= float(tau)) & (max_prob >= float(kappa))
+                            y_pred_tri = np.where(buy, 'UP', np.where(sell, 'DOWN', 'FLAT'))
+                            if metric_choice == 'mcc':
+                                val = float(_mcc(y_true_tri, y_pred_tri))
+                            else:
+                                val = float(_ba(y_true_tri, y_pred_tri))
+                            if val > best_val:
+                                best_val, best_tau, best_kappa = val, float(tau), float(kappa)
+                    if best_tau is not None and best_kappa is not None:
+                        best_thresholds_fold = {'tau': best_tau, 'kappa': best_kappa}
+                        fold_thresholds.append({'fold': int(fold_idx + 1), 'tau': best_tau, 'kappa': best_kappa, metric_choice: best_val})
+                        print(f"Fold {fold_idx + 1}: best thresholds tau={best_tau:.3f}, kappa={best_kappa:.2f}, {metric_choice}={best_val:.4f}")
+                elif y_proba is not None and len(np.unique(y_test_enc)) == 2:
+                    thr_grid = [round(x, 2) for x in np.arange(0.10, 0.95, 0.05)]
+                    try:
+                        idx_pos = int(np.where(np.array(classes_model) == 1)[0][0]) if classes_model is not None else 1
+                    except Exception:
+                        idx_pos = 1
+                    best_val = -1e9
+                    best_thr = None
+                    for t in thr_grid:
+                        y_pred_enc = (np.asarray(y_proba)[:, idx_pos] >= t).astype(int)
+                        if metric_choice == 'mcc':
+                            val = float(_mcc(y_test_enc, y_pred_enc))
+                        else:
+                            val = float(_ba(y_test_enc, y_pred_enc))
+                        if val > best_val:
+                            best_val, best_thr = val, float(t)
+                    if best_thr is not None:
+                        best_thresholds_fold = {'binary_threshold': best_thr}
+                        fold_thresholds.append({'fold': int(fold_idx + 1), 'binary_threshold': best_thr, metric_choice: best_val})
+                        print(f"Fold {fold_idx + 1}: best binary threshold t={best_thr:.2f}, {metric_choice}={best_val:.4f}")
+            except Exception as e:
+                print(f"WARN: threshold search skipped on fold {fold_idx + 1}: {e}")
+
+            # Evaluate with thresholds (if any)
+            m = self.evaluate_model(model_i, X_test, y_test_orig, "Purged Fold", thresholds=best_thresholds_fold)
+            fold_metrics.append(m)
+
+            # Save per-fold OOF and accumulate
+            try:
+                if df_fold is not None and out_dir is not None:
+                    df_fold.to_csv(Path(out_dir) / f'fold_{fold_idx + 1}_oof.csv', index=False)
+                if df_fold is not None:
                     oof_parts.append(df_fold)
+                # Meta-label dataset
+                try:
+                    if ret_fwd is not None and len(ret_fwd) == len(y) and y_proba is not None:
+                        pred_idx = np.argmax(y_proba, axis=1)
+                        pred_labels = [class_labels[int(i)] if int(i) < len(class_labels) else class_labels[0] for i in pred_idx]
+                        def _label_dir(lbl: Any) -> int:
+                            s = str(lbl).upper()
+                            if 'UP' in s:
+                                return 1
+                            if 'DOWN' in s:
+                                return -1
+                            return 0
+                        dir_pred = np.array([_label_dir(v) for v in pred_labels], dtype=int)
+                        r = np.asarray(ret_fwd[mask_test], dtype=float)
+                        sign_true = np.sign(r)
+                        meta_y = (np.sign(dir_pred) == np.sign(sign_true)).astype(int)
+                        meta_X_parts.append(np.asarray(X_test))
+                        meta_y_parts.extend(list(meta_y))
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"WARN: OOF collection failed on fold {fold_idx + 1}: {e}")
             finally:
@@ -1148,13 +1552,36 @@ class EnsembleTrainer:
         results: Dict[str, Any] = {
             'train_metrics': {},
             'test_metrics': test_metrics,
+            'fold_metrics': fold_metrics,
             'feature_importance': importance,
+            'feature_names': (list(feature_names) if feature_names is not None else None),
             'model': last_model,
             'label_encoder': self.label_encoder,
             'validation': 'purged',
             'n_splits': n_splits,
             'embargo_days': embargo_days,
+            'embargo_strategy': ('dynamic' if (dynamic_embargo if dynamic_embargo is not None else (dynamic_horizon_k is not None)) else 'static'),
+            'fold_embargo_bars': fold_embargo_bars,
         }
+        if fold_thresholds:
+            try:
+                results['fold_thresholds'] = fold_thresholds
+                if any('tau' in d for d in fold_thresholds):
+                    taus = [d['tau'] for d in fold_thresholds if 'tau' in d]
+                    kappas = [d['kappa'] for d in fold_thresholds if 'kappa' in d]
+                    if taus and kappas:
+                        avg_tau = float(np.mean(taus))
+                        avg_kappa = float(np.mean(kappas))
+                        results['avg_thresholds'] = {'tau': avg_tau, 'kappa': avg_kappa}
+                        print(f"Avg thresholds across folds: tau={avg_tau:.3f}, kappa={avg_kappa:.2f}")
+                elif any('binary_threshold' in d for d in fold_thresholds):
+                    thrs = [d['binary_threshold'] for d in fold_thresholds if 'binary_threshold' in d]
+                    if thrs:
+                        avg_thr = float(np.mean(thrs))
+                        results['avg_thresholds'] = {'binary_threshold': avg_thr}
+                        print(f"Avg binary threshold across folds: t={avg_thr:.3f}")
+            except Exception:
+                pass
 
         # Save aggregated OOF and compute adaptive thresholds if available
         if out_dir is not None and oof_parts:
@@ -1162,18 +1589,178 @@ class EnsembleTrainer:
                 oof_df_all = pd.concat(oof_parts, ignore_index=True)
                 oof_path = Path(out_dir) / 'oof.csv'
                 oof_df_all.to_csv(oof_path, index=False)
-                # Compute thresholds using adaptive aggregation (works for 3 or 5 classes)
+                # Compute thresholds only for true trinary labels (DOWN/FLAT/UP)
                 try:
-                    thr = find_thresholds_from_oof(oof_df_all)
-                    results['oof_thresholds'] = thr
-                    with open(Path(out_dir) / 'oof_thresholds.json', 'w') as f:
-                        json.dump(thr, f, indent=2)
+                    enc_classes = set(str(c).upper() for c in getattr(self.label_encoder, 'classes_', []))
+                    if {'DOWN', 'FLAT', 'UP'}.issubset(enc_classes) and len(enc_classes) == 3:
+                        thr = find_thresholds_from_oof(oof_df_all)
+                        results['oof_thresholds'] = thr
+                        with open(Path(out_dir) / 'oof_thresholds.json', 'w') as f:
+                            json.dump(thr, f, indent=2)
+                    else:
+                        print("INFO: Skipping OOF threshold optimization because labels are not trinary.")
                 except Exception as e:
                     print(f"WARN: threshold search on OOF failed: {e}")
             except Exception as e:
                 print(f"WARN: could not save aggregated OOF: {e}")
 
+        # Train meta-model (logistic) on OOF-derived meta labels
+        try:
+            if meta_X_parts and meta_y_parts:
+                X_meta = np.vstack(meta_X_parts)
+                y_meta = np.asarray(meta_y_parts, dtype=int)
+                from sklearn.linear_model import LogisticRegression as _LR
+                from sklearn.metrics import accuracy_score as _acc, balanced_accuracy_score as _bacc
+                meta_clf = _LR(max_iter=2000, class_weight='balanced', solver='lbfgs')
+                # Simple holdout for quick estimate
+                split_idx = int(0.8 * len(X_meta))
+                Xm_tr, Xm_te = X_meta[:split_idx], X_meta[split_idx:]
+                ym_tr, ym_te = y_meta[:split_idx], y_meta[split_idx:]
+                meta_clf.fit(Xm_tr, ym_tr)
+                ym_pred = meta_clf.predict(Xm_te)
+                meta_metrics = {
+                    'train_size': int(len(Xm_tr)),
+                    'test_size': int(len(Xm_te)),
+                    'accuracy': float(_acc(ym_te, ym_pred)),
+                    'balanced_accuracy': float(_bacc(ym_te, ym_pred)),
+                }
+                results['meta'] = meta_metrics
+                # Persist meta-model if possible
+                try:
+                    if out_dir is not None and HAS_JOBLIB:
+                        assert joblib is not None
+                        meta_path = Path(out_dir) / 'meta_model.joblib'
+                        joblib.dump(meta_clf, meta_path)
+                        results['meta_model_path'] = str(meta_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"WARN: meta-model training failed: {e}")
+
         return last_model, results
+
+# --- Systematic Feature Selection (Ablation + optional SHAP) ---
+
+def _group_feature_indices(feature_names: List[str]) -> Dict[str, List[int]]:
+    groups: Dict[str, List[int]] = {
+        'trend': [], 'volatility': [], 'volume': [], 'rs': [], 'events': []
+    }
+    for i, f in enumerate(feature_names):
+        fl = f.lower()
+        if any(k in fl for k in ['sma', 'ema', 'wma', 'mom', 'momentum', 'roc', 'bb_position', 'kc_position', 'slope', 'trend']):
+            groups['trend'].append(i)
+        elif any(k in fl for k in ['atr', 'hv', 'volatility', 'bb_width', 'keltner', 'rv_', 'range', 'vix', 'dd_z']):
+            groups['volatility'].append(i)
+        elif any(k in fl for k in ['volume', 'obv', 'adl', 'dollar_vol', 'vol_']):
+            groups['volume'].append(i)
+        elif any(k in fl for k in ['rel_strength', 'rs_', 'breadth', 'regime_state']):
+            groups['rs'].append(i)
+        elif any(k in fl for k in ['fomc', 'cpi', 'ecb', 'nonfarm', 'earnings', 'news', 'event']):
+            groups['events'].append(i)
+        else:
+            # default to trend bucket if unknown
+            groups['trend'].append(i)
+    return groups
+
+
+def run_feature_selection(trainer: Any,
+                          X: np.ndarray,
+                          y: np.ndarray,
+                          dates: List[Any],
+                          tickers: Optional[List[str]],
+                          feature_names: List[str],
+                          args: Any) -> Tuple[np.ndarray, List[str], Dict[str, Any]]:
+    groups = _group_feature_indices(feature_names)
+    order = ['trend', 'volatility', 'volume', 'rs', 'events']
+
+    def eval_with(idx: List[int]) -> float:
+        Xs = X[:, idx]
+        _, res = trainer.train_and_evaluate(
+            Xs, y, dates=dates, tickers=tickers,
+            test_size=0.2, validation=args.validation,
+            embargo_days=args.embargo, n_splits=args.n_splits,
+            horizon=args.horizon, out_dir=None,
+            ret_fwd=None, feature_names=[feature_names[i] for i in idx],
+            dynamic_horizon_k=args.dynamic_horizon_k,
+            dynamic_embargo=bool(args.dynamic_horizon_k is not None),
+            allow_suspicious_features=bool(args.allow_suspicious_features)
+        )
+        tm = res.get('test_metrics', {})
+        return float(tm.get('balanced_accuracy', 0.0))
+
+    selected: List[int] = []
+    report: Dict[str, Any] = {'stage1': [], 'stage2': []}
+
+    base_score = None
+    # Stage 1: incremental ablation by groups
+    for g in order:
+        g_idx = groups.get(g, [])
+        if not g_idx:
+            continue
+        cand = sorted(set(selected + g_idx))
+        cand_score = eval_with(cand)
+        if base_score is None:  # take first available group
+            selected = cand
+            base_score = cand_score
+            report['stage1'].append({'group': g, 'kept': True, 'score': cand_score, 'gain': None})
+            continue
+        gain = cand_score - base_score
+        keep = gain >= float(getattr(args, 'ablation_min_gain', 0.005))
+        report['stage1'].append({'group': g, 'kept': bool(keep), 'score': cand_score, 'gain': float(gain)})
+        if keep:
+            selected = cand
+            base_score = cand_score
+
+    # Stage 2: optional SHAP pruning verified via purged OOF
+    if getattr(args, 'shap_selection', False) and 'HAS_SHAP' in globals() and HAS_SHAP:
+        try:
+            assert shap is not None
+            if not selected:
+                selected = list(range(X.shape[1]))
+            # Fit a tree model for SHAP values
+            models = trainer.create_models()
+            mdl = models.get('xgboost') or models.get('random_forest')
+            if mdl is not None:
+                from sklearn.preprocessing import LabelEncoder as _LE
+                le = _LE()
+                y_enc = le.fit_transform(y)
+                Xs = X[:, selected]
+                mdl.fit(Xs, y_enc)
+                # Subsample for speed
+                n_sub = min(2000, Xs.shape[0])
+                idx_sub = np.linspace(0, Xs.shape[0]-1, n_sub, dtype=int)
+                expl = shap.TreeExplainer(mdl)
+                sh = expl.shap_values(Xs[idx_sub])
+                if isinstance(sh, list):
+                    shap_abs = np.mean(np.mean(np.abs(np.array(sh)), axis=0), axis=0)
+                else:
+                    shap_abs = np.mean(np.abs(sh), axis=0)
+                # Rank features by importance ascending
+                order_low = np.argsort(shap_abs)
+                if base_score is None:
+                    base_score = eval_with(selected)
+
+                drops = 0
+                for j in order_low[:10]:  # check up to 10 least-informative
+                    if drops >= 3:
+                        break
+                    feat_global_idx = selected[int(j)]
+                    trial_idxs = [k for k in selected if k != feat_global_idx]
+                    score_minus = eval_with(trial_idxs)
+                    # Accept drop if performance doesn't deteriorate more than 0.001
+                    if score_minus >= (base_score - 0.001):
+                        report['stage2'].append({'dropped_feature': feature_names[feat_global_idx], 'prev_score': base_score, 'new_score': score_minus})
+                        selected = trial_idxs
+                        base_score = score_minus
+                        drops += 1
+        except Exception as e:
+            print(f"WARN: SHAP selection skipped: {e}")
+
+    X_sel = X[:, selected]
+    feat_sel = [feature_names[i] for i in selected]
+    report['final'] = {'n_features': len(selected), 'score': base_score}
+    return X_sel, feat_sel, report
+
 
 
 
@@ -1209,22 +1796,35 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df['price_over_sma50'] = np.clip(df['Close'] / df['sma50'], 0.5, 2.0)
     df['price_over_sma200'] = np.clip(df['Close'] / df['sma200'], 0.5, 2.0)
 
-    # RSI
+    # RSI (classical) and Wilder RSI(2,14)
     delta = pd.to_numeric(df['Close'].diff(), errors='coerce').astype('float64')
     gain = delta.where(delta > 0, 0.0).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
-    # Add small epsilon to prevent division by zero
     rs = gain / (loss + 1e-8)
     df['rsi'] = 100 - (100 / (1 + rs))
     df['rsi_norm'] = df['rsi'] / 100.0
+    # Wilder RSI helper
+    def _rsi_wilder(s: pd.Series, n: int) -> pd.Series:
+        d = s.diff()
+        up = d.clip(lower=0)
+        dn = -d.clip(upper=0)
+        au = up.ewm(alpha=1.0/n, adjust=False).mean()
+        ad = dn.ewm(alpha=1.0/n, adjust=False).mean()
+        rs_ = au / (ad + 1e-8)
+        return 100 - (100 / (1 + rs_))
+    df['rsi2_w'] = _rsi_wilder(df['Close'], 2)
+    df['rsi14_w'] = _rsi_wilder(df['Close'], 14)
 
-    # ATR
+    # ATR and True Range
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = true_range.rolling(window=14).mean()
     df['atr_pct'] = np.clip(df['atr'] / df['Close'], 0, 0.5)  # Cap at 50%
+    # True range ratio vs intraday range
+    intraday = (df['High'] - df['Low']).replace(0, np.nan)
+    df['tr_ratio'] = (true_range / (intraday + 1e-8)).clip(0, 5)
 
     # ATR buckets (more stable quantiles)
     atr_pct_clean = df['atr_pct'].dropna()
@@ -1239,27 +1839,112 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
                              (df['atr_pct'] <= atr_quantiles.iloc[3])).astype(int)
         df['atr_bucket_4'] = (df['atr_pct'] > atr_quantiles.iloc[3]).astype(int)
     else:
-        # Fallback if no valid data
         for i in range(5):
             df[f'atr_bucket_{i}'] = 0
 
-    # Additional features (with stability improvements)
+    # Volume stats
     vol_ma20 = df['Volume'].rolling(20).mean()
+    vol_std20 = df['Volume'].rolling(20).std()
     vol_ma20_lag = vol_ma20.shift(5)
     df['vol20_rising'] = (vol_ma20 > vol_ma20_lag).astype(int)
+    df['vol_zscore_20'] = (df['Volume'] - vol_ma20) / (vol_std20 + 1e-8)
 
-
-
+    # Momentum/ROC
     df['price_gt_ma20'] = (df['Close'] > df['sma20']).astype(int)
     df['rsi_oversold'] = (df['rsi'] < 30).astype(int)
     df['rsi_overbought'] = (df['rsi'] > 70).astype(int)
-    df['rsi_momentum'] = np.clip(df['rsi'].diff(5), -50, 50)  # Clip extreme values
+    df['rsi_momentum'] = np.clip(df['rsi'].diff(5), -50, 50)
+    df['roc_5'] = df['Close'].pct_change(5)
+    df['roc_10'] = df['Close'].pct_change(10)
+    df['roc_20'] = df['Close'].pct_change(20)
+    df['momentum_10d'] = df['Close'] - df['Close'].shift(10)
+    df['momentum_20d'] = df['Close'] - df['Close'].shift(20)
 
-    df['sma_alignment'] = ((df['sma20'] > df['sma50']) &
-                          (df['sma50'] > df['sma200'])).astype(int)
-    df['above_all_smas'] = ((df['Close'] > df['sma20']) &
-                           (df['Close'] > df['sma50']) &
-                           (df['Close'] > df['sma200'])).astype(int)
+    # Stochastic oscillators (14,3)
+    ll14 = df['Low'].rolling(14).min()
+    hh14 = df['High'].rolling(14).max()
+    stoch_k = 100 * (df['Close'] - ll14) / (hh14 - ll14 + 1e-8)
+    df['stoch_k'] = stoch_k
+    df['stoch_d'] = stoch_k.rolling(3).mean()
+
+    # SMA slopes over last 10 bars (linear regression slope)
+    def _roll_slope(s: pd.Series, w: int) -> pd.Series:
+        x = np.arange(w)
+        return s.rolling(w).apply(lambda y: np.polyfit(x, y, 1)[0] if np.isfinite(y).all() else np.nan, raw=False)
+    df['sma20_slope10'] = _roll_slope(df['sma20'], 10)
+    df['sma50_slope10'] = _roll_slope(df['sma50'], 10)
+    df['sma200_slope10'] = _roll_slope(df['sma200'], 10)
+
+    # Breakout/Support-Resistance distances
+    h20 = df['High'].rolling(20).max(); l20 = df['Low'].rolling(20).min()
+    h55 = df['High'].rolling(55).max(); l55 = df['Low'].rolling(55).min()
+    df['dist_pct_20d_high'] = (df['Close'] / (h20 + 1e-8)) - 1.0
+    df['dist_pct_20d_low'] = (df['Close'] / (l20 + 1e-8)) - 1.0
+    df['dist_pct_55d_high'] = (df['Close'] / (h55 + 1e-8)) - 1.0
+    df['dist_pct_55d_low'] = (df['Close'] / (l55 + 1e-8)) - 1.0
+    near_hi = ((h20 - df['Close']).abs() <= 0.5 * df['atr']).astype(int)
+    near_lo = ((df['Close'] - l20).abs() <= 0.5 * df['atr']).astype(int)
+    df['break_test_hi_10'] = near_hi.rolling(10).sum()
+    df['break_test_lo_10'] = near_lo.rolling(10).sum()
+    df['break_test_hi_20'] = near_hi.rolling(20).sum()
+    df['break_test_lo_20'] = near_lo.rolling(20).sum()
+
+    # Volatility measures
+    close_log_s = pd.to_numeric(df['Close'], errors='coerce').astype('float64').apply(
+        lambda v: np.log(v) if (isinstance(v, (float, int)) and v > 0) else np.nan
+    )
+    log_ret = close_log_s.diff()
+    df['hv10'] = log_ret.rolling(10).std()
+    df['hv20'] = log_ret.rolling(20).std()
+
+    # Bands: Bollinger and Keltner (EMA20, ATR14, mult=2)
+    bb_middle = df['Close'].rolling(20).mean()
+    bb_std = df['Close'].rolling(20).std()
+    bb_upper = bb_middle + (bb_std * 2)
+    bb_lower = bb_middle - (bb_std * 2)
+    bb_width = bb_upper - bb_lower
+    df['bb_position'] = np.clip((df['Close'] - bb_lower) / (bb_width + 1e-8), 0, 1)
+    df['bb_width_norm'] = (bb_width / (bb_middle + 1e-8)).replace([np.inf,-np.inf], np.nan)
+    df['bb_width_z20'] = (df['bb_width_norm'] - df['bb_width_norm'].rolling(20).mean()) / (df['bb_width_norm'].rolling(20).std() + 1e-8)
+    ema20 = df['Close'].ewm(span=20, adjust=False).mean()
+    kc_upper = ema20 + 2.0 * df['atr']
+    kc_lower = ema20 - 2.0 * df['atr']
+    kc_width = kc_upper - kc_lower
+    df['kc_position'] = np.clip((df['Close'] - kc_lower) / (kc_width + 1e-8), 0, 1)
+    df['keltner_width_norm'] = (kc_width / (ema20 + 1e-8)).replace([np.inf,-np.inf], np.nan)
+
+    # Volume/Flow: OBV, ADL, up/down volume differential
+    chg = df['Close'].diff()
+    sign_chg = pd.Series(np.sign(pd.to_numeric(chg, errors='coerce')), index=df.index).fillna(0)
+    obv = (sign_chg * df['Volume']).cumsum()
+    df['obv'] = obv
+    df['obv_slope_10'] = _roll_slope(obv, 10)
+    # ADL
+    clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / (intraday + 1e-8)
+    df['adl'] = (clv * df['Volume']).fillna(0).cumsum()
+    # Up/Down volume differential
+    up_day = (df['Close'] > df['Close'].shift()).astype(int)
+    vol_up_5 = (df['Volume'] * up_day).rolling(5).mean()
+    vol_dn_5 = (df['Volume'] * (1 - up_day)).rolling(5).mean()
+    df['updown_vol_diff_5'] = (vol_up_5 - vol_dn_5) / (vol_ma20 + 1e-8)
+    vol_up_10 = (df['Volume'] * up_day).rolling(10).mean()
+    vol_dn_10 = (df['Volume'] * (1 - up_day)).rolling(10).mean()
+    df['updown_vol_diff_10'] = (vol_up_10 - vol_dn_10) / (vol_ma20 + 1e-8)
+
+    # Wick ratios
+    rng = (df['High'] - df['Low']).replace(0, np.nan)
+    df['upper_wick_ratio'] = (df['High'] - df['Close']) / (rng + 1e-8)
+    df['lower_wick_ratio'] = (df['Close'] - df['Low']) / (rng + 1e-8)
+
+    # Gap features
+    prev_close = df['Close'].shift(1)
+    df['gap_pct'] = (df['Open'] - prev_close) / (prev_close + 1e-8)
+    gap_filled = ((df['High'] >= prev_close) & (df['Low'] <= prev_close)).astype(float)
+    # Approximate gap fill rate over last 5 gaps using 40-bar window
+    gap_occ = (df['gap_pct'].abs() > 0).astype(float)
+    filled_sum = (gap_filled * gap_occ).rolling(40).sum()
+    occ_sum = gap_occ.rolling(40).sum()
+    df['gap_fill_rate_5'] = (filled_sum / (occ_sum + 1e-8)).clip(0, 1)
 
     # Volume ratio (with clipping)
     vol_ratio_raw = df['Volume'] / (df['Volume'].rolling(20).mean() + 1e-8)
@@ -1269,31 +1954,58 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df['price_momentum_5d'] = np.clip(df['Close'].pct_change(5), -0.5, 0.5)
     df['price_momentum_10d'] = np.clip(df['Close'].pct_change(10), -0.5, 0.5)
 
-    # Bollinger Bands position (with stability)
-    bb_middle = df['Close'].rolling(20).mean()
-    bb_std = df['Close'].rolling(20).std()
-    bb_upper = bb_middle + (bb_std * 2)
-    bb_lower = bb_middle - (bb_std * 2)
-    bb_width = bb_upper - bb_lower
-    df['bb_position'] = np.clip((df['Close'] - bb_lower) / (bb_width + 1e-8), 0, 1)
-
     # Volume trend (with stability)
     vol_trend_raw = df['Volume'].rolling(10).mean() / (df['Volume'].rolling(30).mean() + 1e-8)
     df['volume_trend'] = np.clip(vol_trend_raw, 0.1, 5.0)
 
+    # News sentiment placeholders (TODO: integrate real pipeline e.g., finBERT)
+    df['news_sentiment_1d'] = 0.0
+    df['news_sentiment_3d'] = 0.0
+
     return df
 
 def create_labels(df: pd.DataFrame, horizon: int, label_type: str,
-                  q_low: float = 0.33, q_high: float = 0.67) -> pd.Series:
-    """Create labels based on future returns.
+                  q_low: float = 0.33, q_high: float = 0.67,
+                  dynamic_horizon_k: Optional[float] = None) -> pd.Series:
+    """Create labels based on future returns with optional volatility-normalized horizon.
     label_type:
       - 'binary': up/down using fixed threshold (2%)
       - 'multiclass': 5 buckets (legacy)
       - 'trinary': DOWN/FLAT/UP via percentile cutoffs
       - 'regression': raw future return
-    Percentiles computed per-ticker dataframe to be regime-aware.
+    If dynamic_horizon_k is provided, compute a per-row horizon (in bars) scaled by ATR20.
     """
-    future_returns = df['Close'].shift(-horizon) / df['Close'] - 1
+    # Compute dynamic per-row horizon in bars if requested
+    if dynamic_horizon_k is not None:
+        close = pd.to_numeric(df['Close'], errors='coerce').astype('float64')
+        # Prefer absolute ATR20 if available; fallback to atr_pct * Close
+        if 'atr' in df.columns:
+            atr20 = pd.to_numeric(df['atr'], errors='coerce').astype('float64')
+        else:
+            atr_pct = pd.to_numeric(df.get('atr_pct', pd.Series(0, index=df.index)), errors='coerce').astype('float64')
+            atr20 = atr_pct * close
+        # Normalize ATR to typical level to avoid extreme horizons; median over series
+        atr20_np = atr20.to_numpy(dtype='float64', na_value=np.nan)
+        med = np.nanmedian(atr20_np)
+        norm = float(med) if np.isfinite(med) else 1.0
+        norm = norm if norm > 0 else 1.0
+        scale = pd.Series(atr20_np / norm, index=df.index)
+        scale = pd.to_numeric(scale, errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(1.0)
+        # Compute bars per row, clipped to sensible bounds
+        bars = (float(horizon) * float(dynamic_horizon_k) * scale).round().astype('int')
+        bars = bars.clip(lower=5, upper=60)
+        # Forward return over variable horizon
+        fr_vals = np.full(len(close), np.nan, dtype='float64')
+        cvals = close.values
+        bvals = bars.values
+        for i in range(len(cvals)):
+            j = i + int(bvals[i])
+            if j < len(cvals) and np.isfinite(cvals[i]) and np.isfinite(cvals[j]):
+                fr_vals[i] = cvals[j] / cvals[i] - 1.0
+        future_returns = pd.Series(fr_vals, index=df.index)
+    else:
+        future_returns = df['Close'].shift(-horizon) / df['Close'] - 1
+
     fr = pd.to_numeric(future_returns, errors='coerce').astype('float64')
 
     if label_type == 'binary':
@@ -1325,7 +2037,8 @@ def create_labels(df: pd.DataFrame, horizon: int, label_type: str,
         return future_returns
 
 def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
-                 q_low: float = 0.33, q_high: float = 0.67) -> Tuple[np.ndarray, np.ndarray, List[pd.Timestamp], List[str], List[str], np.ndarray]:
+                 q_low: float = 0.33, q_high: float = 0.67,
+                 dynamic_horizon_k: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, List[pd.Timestamp], List[str], List[str], np.ndarray]:
     """Build training dataset with universe breadth and optional calendar dummies.
     Returns X, y, dates, tickers (row-wise aligned), feature_names actually used, ret_fwd per row.
     """
@@ -1393,6 +2106,26 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
     except Exception as e:
         print(f"WARN reading earnings calendar: {e}")
 
+    # Other macro calendars (optional): CPI, ECB, Non-farm payrolls
+    cpi_dates: set[pd.Timestamp] = set()
+    ecb_dates: set[pd.Timestamp] = set()
+    nonfarm_dates: set[pd.Timestamp] = set()
+    def _load_calendar_csv(path: Path, label: str) -> set[pd.Timestamp]:
+        try:
+            if path.exists():
+                dfc = pd.read_csv(path)
+                date_col = 'date' if 'date' in dfc.columns else dfc.columns[0]
+                return set(pd.to_datetime(dfc[date_col]).dt.normalize())
+            else:
+                print(f"WARN: calendar file missing: {path}")
+                return set()
+        except Exception as e:
+            print(f"WARN reading {label} calendar: {e}")
+            return set()
+    cpi_dates = _load_calendar_csv(Path('config/cpi_dates.csv'), 'CPI')
+    ecb_dates = _load_calendar_csv(Path('config/ecb_dates.csv'), 'ECB')
+    nonfarm_dates = _load_calendar_csv(Path('config/nonfarm_dates.csv'), 'Nonfarm')
+
     # 2) First pass: fetch and compute per-ticker base features
     data_by_ticker: Dict[str, pd.DataFrame] = {}
     above_map: Dict[str, pd.Series] = {}
@@ -1428,28 +2161,50 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
         above_df[t] = s.reindex(union_index).ffill()
     breadth_true = above_df.mean(axis=1).rolling(10, min_periods=1).mean().clip(0, 1)
 
-    # Prioritized features (cap to 22 later)
+    # Prioritized features (cap applied later)
     prioritized = [
-        'price_over_sma20','price_over_sma50','price_over_sma200','rsi_norm','atr_pct',
-        'price_momentum_5d','price_momentum_10d','bb_position','volume_trend',
-        'volatility_rank','vol_ratio','sma_alignment','above_all_smas','rsi_momentum',
+        # Core trend/vol
+        'price_over_sma20','price_over_sma50','price_over_sma200','atr_pct',
+        'rsi14_w','rsi2_w','stoch_k','stoch_d',
+        'price_momentum_5d','price_momentum_10d','roc_10','momentum_10d',
+        'bb_position','kc_position','bb_width_z20','keltner_width_norm',
+        'volatility_rank','vol_ratio','vol_zscore_20','sma_alignment','above_all_smas','rsi_momentum',
         'momentum_diff_5_20','liquidity_volume_pct','breadth_proxy',
-        # New regime/signal features
-        'rel_strength_spy','breadth_proxy_delta_10d','rv_20_z','rv_10_z','dollar_vol_pct','rv_60_z',
-        # Calendar features
-        'is_fomc','days_since_fomc','days_until_fomc','fomc_expected_change',
-        'is_earnings_window','earnings_surprise','earnings_guidance','earnings_pre','earnings_post'
+        # Market context / RS
+        'rel_strength_ratio','rel_strength_slope_10','spy_dd_z','spy_range_proxy',
+        'breadth_proxy_delta_10d','rv_20_z','rv_10_z','dollar_vol_pct','rv_60_z',
+        'regime_state',
+        # Volume/flow & microstructure
+        'obv_slope_10','adl','upper_wick_ratio','lower_wick_ratio','tr_ratio',
+        # Macro calendars (next 3 trading days)
+        'is_fomc','days_since_fomc','days_until_fomc','fomc_expected_change','fomc_next_3d',
+        'cpi_next_3d','ecb_next_3d','nonfarm_next_3d',
+        # Earnings proximity
+        'is_earnings_window','days_to_earnings','earnings_surprise','earnings_guidance','earnings_pre','earnings_post',
+        # News sentiment (placeholder)
+        'news_sentiment_1d','news_sentiment_3d'
     ]
 
-    # Precompute SPY relative ratio for rel_strength_spy
-    spy_rel = None
+    # Precompute SPY-derived context features
+    spy_close = None
+    spy_dd_z = None
+    spy_range_proxy = None
     try:
         spy_df = fetch_history('SPY', years)
         if spy_df is not None and len(spy_df) >= 100:
             spy_feats = compute_basic_features(spy_df)
-            spy_rel = (spy_feats['Close'] / (spy_feats['sma50'] + 1e-8)).replace([np.inf, -np.inf], np.nan)
+            # Core SPY series
+            spy_close = pd.to_numeric(spy_feats['Close'], errors='coerce').astype('float64')
+            # Drawdown vs 252d rolling high and its z-score
+            roll_high = spy_close.rolling(252, min_periods=60).max()
+            dd = (spy_close / (roll_high + 1e-8)) - 1.0
+            dd_mean = dd.rolling(252, min_periods=60).mean()
+            dd_std = dd.rolling(252, min_periods=60).std()
+            spy_dd_z = (dd - dd_mean) / (dd_std + 1e-8)
+            # VIX proxy via intraday range
+            spy_range_proxy = (pd.to_numeric(spy_feats['High'], errors='coerce') - pd.to_numeric(spy_feats['Low'], errors='coerce')) / (spy_close + 1e-8)
     except Exception as e:
-        print(f"WARN: could not compute SPY relative series: {e}")
+        print(f"WARN: could not compute SPY context: {e}")
 
     # 4) Second pass: align, add breadth + calendar dummies, label, and collect
     for ticker, df_features in data_by_ticker.items():
@@ -1481,6 +2236,28 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
             df_features['days_until_fomc'] = 999.0
             df_features['fomc_expected_change'] = 0.0
 
+        # Helper: next 3 trading days indicator for a set of event dates
+        def _next3_indicator(index: pd.DatetimeIndex, dates_set: set[pd.Timestamp]) -> np.ndarray:
+            if not dates_set or len(index) == 0:
+                return np.zeros(len(index), dtype=int)
+            arr = np.zeros(len(index), dtype=int)
+            idx_list = list(index)
+            for i in range(len(idx_list)):
+                hit = False
+                for j in (1, 2, 3):
+                    k = i + j
+                    if k < len(idx_list) and idx_list[k].normalize() in dates_set:
+                        hit = True
+                        break
+                arr[i] = 1 if hit else 0
+            return arr
+
+        # Macro next-3d dummies
+        df_features['fomc_next_3d'] = _next3_indicator(idx_norm, fomc_dates)
+        df_features['cpi_next_3d'] = _next3_indicator(idx_norm, cpi_dates)
+        df_features['ecb_next_3d'] = _next3_indicator(idx_norm, ecb_dates)
+        df_features['nonfarm_next_3d'] = _next3_indicator(idx_norm, nonfarm_dates)
+
         # Earnings window dummy per ticker (+/- 3 days) and enriched features
         evs = earnings_events.get(ticker, [])
         if evs:
@@ -1489,6 +2266,19 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
             guidance = pd.Series(0.0, index=df_features.index, dtype=float)
             is_pre = pd.Series(0, index=df_features.index, dtype=int)
             is_post = pd.Series(0, index=df_features.index, dtype=int)
+            # Precompute sorted earnings dates for days_to_earnings calculation
+            earn_dates: List[pd.Timestamp] = []
+            for _ev in evs:
+                _d = _ev.get('date')
+                if _d is None:
+                    continue
+                try:
+                    _dd = pd.to_datetime(_d).normalize()
+                    if isinstance(_dd, pd.Timestamp):
+                        earn_dates.append(_dd)
+                except Exception:
+                    pass
+            earn_dates_sorted = sorted(earn_dates)
             for ev in evs:
                 d = ev.get('date')
                 if d is None:
@@ -1502,23 +2292,37 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
                     surprise.loc[d] = float(ev.get('surprise', 0.0))
                     guidance.loc[d] = float(ev.get('guidance', 0.0))
                     tval = str(ev.get('time', '')).lower()
-
-
-
                     if tval in ('bmo', 'pre', 'pre-market', 'premarket'):
                         is_pre.loc[d] = 1
                     if tval in ('amc', 'post', 'post-market', 'aftermarket'):
                         is_post.loc[d] = 1
             df_features['is_earnings_window'] = ewin
+            # days_to_earnings: min days until next earnings (999 if none)
+            dte = []
+            for d in df_features.index:
+                nxt = [ed for ed in earn_dates_sorted if ed >= d.normalize()]
+                dte.append((nxt[0] - d.normalize()).days if nxt else 999)
+            df_features['days_to_earnings'] = np.array(dte, dtype=float)
             df_features['earnings_surprise'] = surprise.fillna(0.0)
             df_features['earnings_guidance'] = guidance.fillna(0.0)
             df_features['earnings_pre'] = is_pre
-
             df_features['earnings_post'] = is_post
         else:
             df_features['is_earnings_window'] = 0
+            df_features['days_to_earnings'] = 999.0
+
             df_features['earnings_surprise'] = 0.0
             df_features['earnings_guidance'] = 0.0
+            # Regime classification (60d trend + volatility)
+            try:
+                trend_60 = df_features['Close'].pct_change(60)
+                vol_z_60 = df_features.get('rv_60_z', pd.Series(index=df_features.index, data=np.nan))
+                regime = pd.Series(0.0, index=df_features.index)
+                regime[(trend_60 > 0.03) & (vol_z_60 < 1.5)] = 1.0
+                regime[(trend_60 < -0.03) & (vol_z_60 < 1.5)] = -1.0
+                df_features['regime_state'] = regime.fillna(0.0)
+            except Exception:
+                df_features['regime_state'] = 0.0
             df_features['earnings_pre'] = 0
             df_features['earnings_post'] = 0
 
@@ -1529,6 +2333,7 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
 
             # Realized volatility z-scores
             ret = df_features['Close'].pct_change()
+
             def _rv_z(ret_ser: pd.Series, w: int) -> pd.Series:
                 rv = ret_ser.rolling(window=w, min_periods=max(5, w // 2)).std()
                 m = rv.rolling(window=252, min_periods=20).mean()
@@ -1542,20 +2347,29 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
             dv = (df_features['Close'] * df_features['Volume']).astype(float)
             df_features['dollar_vol_pct'] = dv.rolling(window=252, min_periods=20).rank(pct=True)
 
-            # Relative strength vs SPY (ffill only; no backfill)
-            if spy_rel is not None:
-                ticker_rel = (df_features['Close'] / (df_features['sma50'] + 1e-8))
-                spy_aligned = spy_rel.reindex(df_features.index).ffill()
-                df_features['rel_strength_spy'] = (ticker_rel / (spy_aligned + 1e-8)).replace([np.inf, -np.inf], np.nan)
+            # Relative strength vs SPY (Close ratio) and market proxies
+            if spy_close is not None:
+                spy_aligned = pd.Series(spy_close).reindex(df_features.index).ffill()
+                rs = (pd.to_numeric(df_features['Close'], errors='coerce') / (spy_aligned + 1e-8)).replace([np.inf,-np.inf], np.nan)
+
+
+                df_features['rel_strength_ratio'] = rs
+                # 10-bar slope of RS
+                x = np.arange(10)
+                df_features['rel_strength_slope_10'] = rs.rolling(10).apply(lambda y: np.polyfit(x, y, 1)[0] if np.isfinite(y).all() else np.nan, raw=False)
+            if spy_dd_z is not None:
+                df_features['spy_dd_z'] = pd.Series(spy_dd_z).reindex(df_features.index).ffill()
+            if spy_range_proxy is not None:
+                df_features['spy_range_proxy'] = pd.Series(spy_range_proxy).reindex(df_features.index).ffill()
         except Exception as e:
             print(f"WARN: regime features for {ticker} failed: {e}")
 
         # Labels
-        labels = create_labels(df_features, horizon, label_type, q_low=q_low, q_high=q_high)
+        labels = create_labels(df_features, horizon, label_type, q_low=q_low, q_high=q_high, dynamic_horizon_k=dynamic_horizon_k)
         available = [c for c in prioritized if c in df_features.columns]
         if len(available) < 10:
-            available = FEATURE_ORDER[:22]
-        current_features = list(dict.fromkeys(available))[:22]
+            available = FEATURE_ORDER[:28]
+        current_features = list(dict.fromkeys(available))[:28]
 
 
         if final_feature_names is None:
@@ -1598,6 +2412,9 @@ def main():
                        help='Model type to train')
     parser.add_argument('--years', type=int, default=3, help='Years of data')
     parser.add_argument('--horizon', type=int, default=20, help='Prediction horizon')
+    parser.add_argument('--dynamic-horizon-k', type=float, default=None,
+                        help='If set, use volatility-normalized horizon per row: bars ~ horizon * k * (ATR20 / median(ATR20))')
+
     parser.add_argument('--label-type', default='trinary',
                        choices=['binary', 'multiclass', 'trinary', 'regression'],
                        help='Label type')
@@ -1616,10 +2433,28 @@ def main():
     parser.add_argument('--mlflow', action='store_true', help='Enable MLflow logging if available')
     parser.add_argument('--wandb', action='store_true', help='Enable Weights & Biases logging if available')
 
+    parser.add_argument('--embargo-sensitivity-test', action='store_true',
+                        help='Run purged CV with embargo periods [20,30,40] bars and output a comparison report')
+    parser.add_argument('--allow-suspicious-features', action='store_true',
+                        help='Allow suspicious feature names (temporal leakage guard override)')
+
+    # Threshold optimization and feature selection options
+    parser.add_argument('--threshold-metric', default='balanced_accuracy',
+                        choices=['balanced_accuracy', 'mcc'],
+                        help='Metric to optimize when tuning probability thresholds')
+    parser.add_argument('--feature-selection', action='store_true', default=False,
+                        help='Enable two-stage feature selection: ablation + SHAP pruning (OOF-validated)')
+    parser.add_argument('--ablation-min-gain', type=float, default=0.005,
+                        help='Minimum balanced accuracy gain to keep a feature group in ablation (e.g., 0.005 = +0.5pp)')
+    parser.add_argument('--shap-selection', action='store_true', default=False,
+                        help='Enable SHAP-based redundancy pruning after ablation (each drop OOF-validated)')
+
     args = parser.parse_args()
 
     # Create output directory
     out_dir = Path(args.out_dir)
+    # Threshold optimization and feature selection options
+
     out_dir.mkdir(exist_ok=True)
 
     print(f"Training {args.model_type} model with {args.label_type} labels...")
@@ -1634,14 +2469,13 @@ def main():
         print(f"Loading data for {len(tickers)} tickers...")
 
         X, y, dates, tickers_row, feature_names, ret_fwd = build_dataset(tickers, args.years, args.horizon, args.label_type,
-                                  q_low=args.q_low, q_high=args.q_high)
+                                  q_low=args.q_low, q_high=args.q_high, dynamic_horizon_k=args.dynamic_horizon_k)
         print(f"Dataset built: {X.shape[0]} samples, {X.shape[1]} features")
 
         # Calculate basic stats
         if args.label_type in ('multiclass', 'trinary', 'binary'):
             unique_labels, counts = np.unique(y, return_counts=True)
             label_dist = dict(zip([str(u) for u in unique_labels], counts.tolist()))
-            print(f"Label distribution: {label_dist}")
         else:
             label_dist = {"mean": float(np.mean(y)), "std": float(np.std(y))}
 
@@ -1653,6 +2487,24 @@ def main():
             trainer.optuna_timeout = int(args.optuna_timeout)
         trainer.stacking_cv_splits = int(args.stacking_cv_splits)
         trainer.meta_C = float(args.meta_C)
+        trainer.threshold_metric = str(args.threshold_metric)
+
+        # Optional two-stage feature selection (purged OOF validated)
+        if bool(args.feature_selection):
+            print("\n🧪 Running feature selection (Stage 1: ablation; Stage 2: SHAP, optional)...")
+            X_fs, feat_fs, fs_report = run_feature_selection(trainer, X, y, dates, tickers_row, list(feature_names), args)
+            # Persist report
+            try:
+                (out_dir).mkdir(exist_ok=True)
+                with open(Path(out_dir) / 'feature_selection.json', 'w') as f:
+                    json.dump(fs_report, f, indent=2)
+            except Exception as e:
+                print(f"WARN: could not persist feature selection report: {e}")
+            # Apply selected features to training set
+            X = X_fs
+            feature_names = feat_fs
+            print(f"Selected {len(feature_names)} features after selection.")
+
         # CI safeguards
         if os.getenv('GITHUB_ACTIONS', '').lower() == 'true':
             # Constrain trials/timeouts to keep runs within GH Actions limits
@@ -1667,7 +2519,10 @@ def main():
             test_size=0.2, validation=args.validation,
             embargo_days=args.embargo, n_splits=args.n_splits,
             horizon=args.horizon, out_dir=out_dir,
-            ret_fwd=ret_fwd, feature_names=feature_names
+            ret_fwd=ret_fwd, feature_names=feature_names,
+            dynamic_horizon_k=args.dynamic_horizon_k,
+            dynamic_embargo=bool(args.dynamic_horizon_k is not None),
+            allow_suspicious_features=bool(args.allow_suspicious_features)
         )
 
         # Optional experiment tracking
@@ -1755,6 +2610,88 @@ def main():
                 return obj.tolist()
             else:
                 return obj
+        # Optional: embargo sensitivity testing (static 20/30/40 bar embargo)
+        if getattr(args, 'embargo_sensitivity_test', False):
+            print("\n🔎 Running embargo sensitivity test for [20, 30, 40] bars...")
+            embargo_values = [20, 30, 40]
+            run_results: Dict[int, Dict[str, Any]] = {}
+
+            # Local helper for paired permutation p-value (two-sided)
+            def _paired_perm_pvalue(a: List[float], b: List[float], n_iter: int = 5000) -> float:
+                try:
+                    d = np.array(a, dtype=float) - np.array(b, dtype=float)
+                    d = d[np.isfinite(d)]
+                    if d.size == 0:
+                        return 1.0
+                    obs = np.mean(d)
+                    if np.allclose(d, 0):
+                        return 1.0
+                    cnt = 0
+                    for _ in range(int(max(500, n_iter))):
+                        signs = np.random.choice([-1, 1], size=d.size)
+                        perm_mean = np.mean(signs * d)
+                        if abs(perm_mean) >= abs(obs):
+                            cnt += 1
+                    return float(cnt) / float(max(1, n_iter))
+                except Exception:
+                    return 1.0
+
+            for e in embargo_values:
+                subdir = out_dir / f"embargo_{e}"
+                subdir.mkdir(exist_ok=True)
+                _, res = trainer.train_and_evaluate(
+                    X, y, dates=dates, tickers=tickers_row,
+                    test_size=0.2, validation='purged',
+                    embargo_days=int(e), n_splits=int(args.n_splits),
+                    horizon=int(args.horizon), out_dir=subdir,
+                    ret_fwd=ret_fwd, feature_names=feature_names,
+                    dynamic_horizon_k=args.dynamic_horizon_k,
+                    dynamic_embargo=False,
+                    allow_suspicious_features=bool(args.allow_suspicious_features),
+                )
+                run_results[int(e)] = res
+
+            # Build comparison report
+            metrics_keys = ['accuracy', 'balanced_accuracy', 'f1_score', 'auc']
+            report: Dict[str, Any] = {
+                'per_embargo': {str(k): run_results[k].get('test_metrics', {}) for k in embargo_values},
+                'pairwise': {},
+                'n_folds': int(run_results[embargo_values[0]].get('n_splits', args.n_splits)),
+            }
+            pairs = [(20, 30), (20, 40), (30, 40)]
+            for a, b in pairs:
+                key = f"{a}_vs_{b}"
+                rep_k: Dict[str, Any] = {}
+                fa = run_results[a].get('fold_metrics', [])
+                fb = run_results[b].get('fold_metrics', [])
+                # Align by number of folds
+                n = min(len(fa), len(fb))
+                for mk in metrics_keys:
+                    va = [float(fa[i].get(mk, np.nan)) for i in range(n)]
+                    vb = [float(fb[i].get(mk, np.nan)) for i in range(n)]
+                    # Drop NaNs pairwise
+                    paired = [(x, y) for x, y in zip(va, vb) if np.isfinite(x) and np.isfinite(y)]
+                    if paired:
+                        xa, xb = zip(*paired)
+                        diff = float(np.mean(np.array(xa) - np.array(xb)))
+                        pval = _paired_perm_pvalue(list(xa), list(xb), n_iter=3000)
+                        rep_k[mk] = {'mean_diff': diff, 'p_value': pval}
+                report['pairwise'][key] = rep_k
+
+            # Persist report
+            try:
+                with open(out_dir / 'embargo_sensitivity.json', 'w') as f:
+                    json.dump(report, f, indent=2)
+                print("\nEmbargo sensitivity summary (per test metric):")
+                for e in embargo_values:
+                    tm = report['per_embargo'].get(str(e), {})
+                    print(f"  embargo={e}: acc={tm.get('accuracy', 0.):.4f}, ba={tm.get('balanced_accuracy', 0.):.4f}, f1={tm.get('f1_score', 0.):.4f}, auc={tm.get('auc', 0.):.4f}")
+                print("\nPairwise significance (mean_diff, p_value):")
+                for k, vals in report['pairwise'].items():
+                    print(f"  {k}: {vals}")
+            except Exception as e:
+                print(f"WARN: could not write embargo_sensitivity.json: {e}")
+
 
         # Prepare model metadata with real performance metrics
         model_metadata = {
