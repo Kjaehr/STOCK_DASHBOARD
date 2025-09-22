@@ -22,9 +22,10 @@ from io import StringIO
 from urllib.parse import quote_plus
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, StackingClassifier
 from sklearn.metrics import classification_report, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.utils.class_weight import compute_class_weight
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -283,9 +284,9 @@ class EnsembleTrainer:
 
         return models
     
-    def hyperparameter_tuning(self, X: np.ndarray, y: np.ndarray, 
-                            model_name: str, model: Any) -> Any:
-        """Perform hyperparameter tuning with time series split"""
+    def hyperparameter_tuning(self, X: np.ndarray, y: np.ndarray,
+                            model_name: str, model: Any, sample_weight: Optional[np.ndarray] = None) -> Any:
+        """Perform hyperparameter tuning with time series split; forwards sample_weight if supported"""
         tscv = TimeSeriesSplit(n_splits=3)
         
         param_grids = {
@@ -318,13 +319,20 @@ class EnsembleTrainer:
                 cv=tscv, scoring='roc_auc_ovr',
                 n_jobs=-1, verbose=0
             )
-            grid_search.fit(X, y)
+            try:
+                if sample_weight is not None:
+                    grid_search.fit(X, y, **{'sample_weight': sample_weight})
+                else:
+                    grid_search.fit(X, y)
+            except TypeError:
+                # Estimator may not support sample_weight
+                grid_search.fit(X, y)
             return grid_search.best_estimator_
         
         return model
     
-    def train_ensemble(self, X: np.ndarray, y: np.ndarray) -> VotingClassifier:
-        """Train ensemble with hyperparameter tuning"""
+    def train_ensemble(self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None) -> VotingClassifier:
+        """Train ensemble with hyperparameter tuning; supports sample_weight for imbalance"""
         print("Training individual models...")
         print(f"Dataset: {X.shape[0]} samples, {X.shape[1]} features")
 
@@ -338,14 +346,20 @@ class EnsembleTrainer:
         for name, model in base_models.items():
             print(f"Training and tuning {name}...")
             try:
-                tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model)
+                tuned_model = self.hyperparameter_tuning(X_scaled, y, name, model, sample_weight=sample_weight)
                 tuned_models.append((name, tuned_model))
                 self.models[name] = tuned_model
                 print(f"✅ {name} trained successfully")
             except Exception as e:
                 print(f"❌ {name} training failed: {e}")
                 # Add untrained model as fallback
-                model.fit(X_scaled, y)
+                try:
+                    if sample_weight is not None:
+                        model.fit(X_scaled, y, sample_weight=sample_weight)
+                    else:
+                        model.fit(X_scaled, y)
+                except Exception:
+                    model.fit(X_scaled, y)
                 tuned_models.append((name, model))
                 self.models[name] = model
                 print(f"⚠️ {name} using default parameters")
@@ -360,7 +374,13 @@ class EnsembleTrainer:
         )
 
         print("Training ensemble...")
-        ensemble.fit(X_scaled, y)
+        try:
+            if sample_weight is not None:
+                ensemble.fit(X_scaled, y, sample_weight=sample_weight)
+            else:
+                ensemble.fit(X_scaled, y)
+        except TypeError:
+            ensemble.fit(X_scaled, y)
         print("✅ Ensemble training completed")
 
         return ensemble
@@ -466,52 +486,128 @@ class EnsembleTrainer:
         # Classification report
         print(f"\n📋 {model_name} Classification Report:")
         try:
-            report = classification_report(y, y_pred, zero_division=0)
-            print(report)
+            report_text = classification_report(y, y_pred, zero_division=0)
+            print(report_text)
+            try:
+                report_dict = classification_report(y, y_pred, output_dict=True, zero_division=0)
+                metrics['per_class'] = report_dict
+            except Exception:
+                pass
         except Exception as e:
             print(f"Could not generate classification report: {e}")
 
         return metrics
 
     def train_and_evaluate(self, X: np.ndarray, y: np.ndarray,
-                          test_size: float = 0.2) -> Tuple[Any, Dict[str, Any]]:
-        """Train ensemble and evaluate with train/test split"""
-        from sklearn.model_selection import train_test_split
-
-        # Encode labels to numeric values for XGBoost compatibility
+                          dates: Optional[List['pd.Timestamp']] = None,
+                          tickers: Optional[List[str]] = None,
+                          test_size: float = 0.2,
+                          validation: str = 'simple',
+                          embargo_days: int = 20,
+                          n_splits: int = 3) -> Tuple[Any, Dict[str, Any]]:
+        """Train ensemble and evaluate.
+        validation: 'simple' (time split) or 'purged' (purged K-fold walk-forward with embargo)
+        """
+        # Encode labels to numeric values for model compatibility
         y_encoded = self.label_encoder.fit_transform(y)
 
-        # Time-aware split (important for financial data)
-        split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y_encoded[:split_idx], y_encoded[split_idx:]
-        y_train_orig, y_test_orig = y[:split_idx], y[split_idx:]
+        # Helper to build sample weights for imbalance (multiclass-safe via inverse freq)
+        def make_sample_weight(y_enc: np.ndarray) -> Optional[np.ndarray]:
+            try:
+                classes = np.unique(y_enc)
+                cw = compute_class_weight(class_weight='balanced', classes=classes, y=y_enc)
+                class_to_w = {c: w for c, w in zip(classes, cw)}
+                return np.asarray([class_to_w[v] for v in y_enc], dtype=float)
+            except Exception:
+                return None
 
-        print(f"Training set: {len(X_train)} samples")
-        print(f"Test set: {len(X_test)} samples")
-        print(f"Label classes: {list(self.label_encoder.classes_)}")
+        # Simple time split baseline
+        if validation != 'purged' or dates is None:
+            split_idx = int(len(X) * (1 - test_size))
+            X_train, X_test = X[:split_idx], X[split_idx:]
+            y_train, y_test = y_encoded[:split_idx], y_encoded[split_idx:]
+            y_train_orig, y_test_orig = y[:split_idx], y[split_idx:]
 
-        # Train ensemble
-        ensemble = self.train_ensemble(X_train, y_train)
+            print(f"Training set: {len(X_train)} samples")
+            print(f"Test set: {len(X_test)} samples")
+            print(f"Label classes: {list(self.label_encoder.classes_)}")
 
-        # Evaluate on training set (convert back to original labels for metrics)
-        train_metrics = self.evaluate_model(ensemble, X_train, y_train_orig, "Training Set")
+            sw = make_sample_weight(y_train)
+            ensemble = self.train_ensemble(X_train, y_train, sample_weight=sw)
 
-        # Evaluate on test set (convert back to original labels for metrics)
-        test_metrics = self.evaluate_model(ensemble, X_test, y_test_orig, "Test Set")
+            train_metrics = self.evaluate_model(ensemble, X_train, y_train_orig, "Training Set")
+            test_metrics = self.evaluate_model(ensemble, X_test, y_test_orig, "Test Set")
 
-        # Calculate feature importance
-        feature_names = FEATURE_ORDER[:X.shape[1]]
-        importance = self.calculate_feature_importance(X_train, feature_names)
+            feature_names = FEATURE_ORDER[:X.shape[1]]
+            importance = self.calculate_feature_importance(X_train, feature_names)
 
-        # Combine results
+            results = {
+                'train_metrics': train_metrics,
+                'test_metrics': test_metrics,
+                'feature_importance': importance,
+                'model': ensemble,
+                'label_encoder': self.label_encoder
+            }
+            return ensemble, results
+
+        # Purged walk-forward evaluation with embargo
+        import pandas as _pd
+        date_ser = _pd.to_datetime(_pd.Series(dates))
+        uniq_dates = sorted(date_ser.dropna().unique())
+        if len(uniq_dates) < n_splits + 1:
+            n_splits = max(1, min(2, len(uniq_dates) - 1))
+        date_chunks = np.array_split(np.asarray(uniq_dates), n_splits)
+
+        fold_metrics: List[Dict[str, float]] = []
+        last_model: Any = None
+        for i, test_dates in enumerate(date_chunks):
+            if len(test_dates) == 0:
+                continue
+            test_start = test_dates[0]
+            test_end = test_dates[-1]
+            emb_left = test_start - _pd.Timedelta(days=int(embargo_days))
+            emb_right = test_end + _pd.Timedelta(days=int(embargo_days))
+
+            test_mask = (date_ser >= test_start) & (date_ser <= test_end)
+            train_mask = (date_ser < emb_left) | (date_ser > emb_right)
+
+            X_train, X_test = X[train_mask.values], X[test_mask.values]
+            y_train_enc, y_test_enc = y_encoded[train_mask.values], y_encoded[test_mask.values]
+            y_train_orig, y_test_orig = y[train_mask.values], y[test_mask.values]
+
+            if len(X_train) < 50 or len(X_test) < 10:
+                print(f"Fold {i+1}: insufficient samples (train {len(X_train)}, test {len(X_test)}); skipping")
+                continue
+
+            print(f"Fold {i+1}: train={len(X_train)}, test={len(X_test)} (embargo={embargo_days}d)")
+            sw = make_sample_weight(y_train_enc)
+            model_i = self.train_ensemble(X_train, y_train_enc, sample_weight=sw)
+            last_model = model_i
+
+            m = self.evaluate_model(model_i, X_test, y_test_orig, f"Purged Fold {i+1}")
+            fold_metrics.append(m)
+
+        # Aggregate metrics across folds
+        def avg_dict(dicts: List[Dict[str, float]]) -> Dict[str, float]:
+            if not dicts:
+                return {'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0, 'auc': 0.0}
+            keys = dicts[0].keys()
+            return {k: float(np.mean([d.get(k, 0.0) for d in dicts])) for k in keys}
+
+        test_metrics = avg_dict(fold_metrics)
+        importance = {}
+
         results = {
-            'train_metrics': train_metrics,
+            'train_metrics': {},
             'test_metrics': test_metrics,
             'feature_importance': importance,
-            'model': ensemble,
-            'label_encoder': self.label_encoder
+            'model': last_model,
+            'label_encoder': self.label_encoder,
+            'validation': 'purged',
+            'n_splits': n_splits,
+            'embargo_days': embargo_days
         }
+        return last_model, results
 
         return ensemble, results
 
@@ -616,35 +712,72 @@ def compute_basic_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def create_labels(df: pd.DataFrame, horizon: int, label_type: str) -> pd.Series:
-    """Create labels based on future returns"""
+def create_labels(df: pd.DataFrame, horizon: int, label_type: str,
+                  q_low: float = 0.33, q_high: float = 0.67) -> pd.Series:
+    """Create labels based on future returns.
+    label_type:
+      - 'binary': up/down using fixed threshold (2%)
+      - 'multiclass': 5 buckets (legacy)
+      - 'trinary': DOWN/FLAT/UP via percentile cutoffs
+      - 'regression': raw future return
+    Percentiles computed per-ticker dataframe to be regime-aware.
+    """
     future_returns = df['Close'].shift(-horizon) / df['Close'] - 1
 
     if label_type == 'binary':
         return (future_returns > 0.02).astype(int)  # 2% threshold
     elif label_type == 'multiclass':
-        # Create labels as strings first, then convert to categorical
         labels = pd.Series(index=df.index, dtype='object')
         labels[future_returns >= 0.10] = 'STRONG_UP'
         labels[(future_returns >= 0.02) & (future_returns < 0.10)] = 'WEAK_UP'
         labels[(future_returns >= -0.02) & (future_returns < 0.02)] = 'SIDEWAYS'
         labels[(future_returns >= -0.10) & (future_returns < -0.02)] = 'WEAK_DOWN'
         labels[future_returns < -0.10] = 'STRONG_DOWN'
-
-        # Convert to categorical with predefined categories
         categories = ['STRONG_DOWN', 'WEAK_DOWN', 'SIDEWAYS', 'WEAK_UP', 'STRONG_UP']
+        labels = pd.Categorical(labels, categories=categories, ordered=True)
+        return pd.Series(labels, index=df.index)
+    elif label_type == 'trinary':
+        ret_clean = future_returns.dropna()
+        if len(ret_clean) == 0:
+            return pd.Series(index=df.index, dtype='object')
+        low_cut = ret_clean.quantile(q_low)
+        high_cut = ret_clean.quantile(q_high)
+        labels = pd.Series(index=df.index, dtype='object')
+        labels[future_returns <= low_cut] = 'DOWN'
+        labels[(future_returns > low_cut) & (future_returns < high_cut)] = 'FLAT'
+        labels[future_returns >= high_cut] = 'UP'
+        categories = ['DOWN', 'FLAT', 'UP']
         labels = pd.Categorical(labels, categories=categories, ordered=True)
         return pd.Series(labels, index=df.index)
     else:  # regression
         return future_returns
 
-def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Build training dataset from multiple tickers"""
-    all_features = []
-    all_labels = []
+def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str,
+                 q_low: float = 0.33, q_high: float = 0.67) -> Tuple[np.ndarray, np.ndarray, List[pd.Timestamp], List[str]]:
+    """Build training dataset from multiple tickers and return meta (dates, tickers).
+    Adds context features (breadth proxy, momentum diff, liquidity percentile).
+    """
+    all_features: List[np.ndarray] = []
+    all_labels: List[np.ndarray] = []
+    all_dates: List[pd.Timestamp] = []
+    all_tickers: List[str] = []
 
-    # Use only the first 22 features that we can actually compute
-    current_features = FEATURE_ORDER[:22]
+    # Pre-compute market breadth proxy from SPY (rolling % above SMA50)
+    spy = fetch_history('SPY', years)
+    breadth_map = None
+    if spy is not None and len(spy) > 0:
+        spy_feat = compute_basic_features(spy)
+        spy_feat['spy_above_sma50'] = (spy_feat['Close'] > spy_feat['sma50']).astype(int)
+        spy_feat['breadth_proxy'] = spy_feat['spy_above_sma50'].rolling(10).mean().clip(0, 1)
+        breadth_map = spy_feat['breadth_proxy']
+
+    # Prioritized features (cap to 22 later)
+    prioritized = [
+        'price_over_sma20','price_over_sma50','price_over_sma200','rsi_norm','atr_pct',
+        'price_momentum_5d','price_momentum_10d','bb_position','volume_trend',
+        'volatility_rank','vol_ratio','sma_alignment','above_all_smas','rsi_momentum',
+        'momentum_diff_5_20','liquidity_volume_pct','breadth_proxy'
+    ]
 
     for ticker in tickers:
         print(f"Processing {ticker}...")
@@ -657,43 +790,51 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str)
 
         # Compute features
         df_features = compute_basic_features(df)
+
+        # Extra regime/context features
+        try:
+            if 'volatility_rank' not in df_features.columns:
+                vol20 = df_features['Close'].pct_change().rolling(20).std()
+                df_features['volatility_rank'] = vol20.rolling(252).rank(pct=True)
+            df_features['momentum_diff_5_20'] = (df_features['Close'].pct_change(5) - df_features['Close'].pct_change(20)).clip(-1, 1)
+            vol_roll = df_features['Volume'].rolling(252)
+            df_features['liquidity_volume_pct'] = vol_roll.rank(pct=True)
+            if breadth_map is not None:
+                df_features['breadth_proxy'] = breadth_map.reindex(df_features.index).fillna(method='ffill').fillna(method='bfill')
+        except Exception as e:
+            print(f"WARN extras for {ticker}: {e}")
+
         print(f"  After features: {len(df_features)} rows")
 
-        # Create labels
-        labels = create_labels(df_features, horizon, label_type)
+        # Create labels (supports 'trinary' via percentiles)
+        labels = create_labels(df_features, horizon, label_type, q_low=q_low, q_high=q_high)
         print(f"  Labels created: {len(labels)} rows, {labels.notna().sum()} non-null")
 
-        # Extract feature matrix (be more lenient with NaN handling)
+        # Choose features (cap to 22, keep available only)
+        available = [c for c in prioritized if c in df_features.columns]
+        if len(available) < 10:
+            available = FEATURE_ORDER[:22]
+        current_features = list(dict.fromkeys(available))[:22]
+
+        # Align
         feature_data = df_features[current_features]
         print(f"  Feature data shape: {feature_data.shape}")
         print(f"  Feature data non-null: {feature_data.notna().all(axis=1).sum()} complete rows")
-
-        # Only drop rows where ALL features are NaN
-        feature_data = feature_data.dropna(how='all')
-
-        # For remaining NaN values, forward fill then backward fill
-        feature_data = feature_data.fillna(method='ffill').fillna(method='bfill')
-
-        # Get labels for the same index
+        feature_data = feature_data.dropna(how='all').fillna(method='ffill').fillna(method='bfill')
         label_data = labels.loc[feature_data.index]
-
-        # Remove rows where labels are NaN
         valid_mask = label_data.notna()
         feature_data = feature_data[valid_mask]
         label_data = label_data[valid_mask]
 
         print(f"  Final aligned data: {len(feature_data)} samples")
-
-        if len(feature_data) < 20:  # Reduced minimum samples
+        if len(feature_data) < 20:
             print(f"Skipping {ticker}: insufficient aligned samples ({len(feature_data)} < 20)")
             continue
 
-        feature_matrix = feature_data.values
-        label_vector = label_data.values
-
-        all_features.append(feature_matrix)
-        all_labels.append(label_vector)
-
+        all_features.append(feature_data.values)
+        all_labels.append(label_data.values)
+        all_dates.extend(list(feature_data.index))
+        all_tickers.extend([ticker] * len(feature_data))
         print(f"✅ Added {ticker}: {len(feature_data)} samples")
 
     if not all_features:
@@ -701,8 +842,7 @@ def build_dataset(tickers: List[str], years: int, horizon: int, label_type: str)
 
     X = np.vstack(all_features)
     y = np.concatenate(all_labels)
-
-    return X, y
+    return X, y, all_dates, all_tickers
 
 def main():
     parser = argparse.ArgumentParser(description="Train ensemble ML models")
@@ -713,9 +853,14 @@ def main():
                        help='Model type to train')
     parser.add_argument('--years', type=int, default=3, help='Years of data')
     parser.add_argument('--horizon', type=int, default=20, help='Prediction horizon')
-    parser.add_argument('--label-type', default='multiclass',
-                       choices=['binary', 'multiclass', 'regression'],
+    parser.add_argument('--label-type', default='trinary',
+                       choices=['binary', 'multiclass', 'trinary', 'regression'],
                        help='Label type')
+    parser.add_argument('--q-low', type=float, default=0.33, help='Lower percentile for trinary labels (0-1)')
+    parser.add_argument('--q-high', type=float, default=0.67, help='Upper percentile for trinary labels (0-1)')
+    parser.add_argument('--validation', default='purged', choices=['simple', 'purged'], help='Validation strategy')
+    parser.add_argument('--embargo', type=int, default=20, help='Embargo window in days for purged validation')
+    parser.add_argument('--n-splits', type=int, default=3, help='Number of purged folds')
     parser.add_argument('--max-tickers', type=int, default=30, help='Max tickers')
 
     args = parser.parse_args()
@@ -732,13 +877,14 @@ def main():
         tickers = load_tickers_from_file(args.max_tickers)
         print(f"Loading data for {len(tickers)} tickers...")
 
-        X, y = build_dataset(tickers, args.years, args.horizon, args.label_type)
+        X, y, dates, tickers_row = build_dataset(tickers, args.years, args.horizon, args.label_type,
+                                  q_low=args.q_low, q_high=args.q_high)
         print(f"Dataset built: {X.shape[0]} samples, {X.shape[1]} features")
 
         # Calculate basic stats
-        if args.label_type == 'multiclass':
+        if args.label_type in ('multiclass', 'trinary', 'binary'):
             unique_labels, counts = np.unique(y, return_counts=True)
-            label_dist = dict(zip(unique_labels, counts.tolist()))
+            label_dist = dict(zip([str(u) for u in unique_labels], counts.tolist()))
             print(f"Label distribution: {label_dist}")
         else:
             label_dist = {"mean": float(np.mean(y)), "std": float(np.std(y))}
@@ -748,7 +894,11 @@ def main():
 
         # Train and evaluate model
         print(f"\n🚀 Starting {args.model_type} training...")
-        model, results = trainer.train_and_evaluate(X, y, test_size=0.2)
+        model, results = trainer.train_and_evaluate(
+            X, y, dates=dates, tickers=tickers_row,
+            test_size=0.2, validation=args.validation,
+            embargo_days=args.embargo, n_splits=args.n_splits
+        )
 
         # Create model artifact
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M')
@@ -779,7 +929,12 @@ def main():
                 'years': args.years,
                 'horizon': args.horizon,
                 'max_tickers': args.max_tickers,
-                'test_size': 0.2
+                'test_size': 0.2,
+                'validation': args.validation,
+                'embargo_days': args.embargo,
+                'n_splits': args.n_splits,
+                'q_low': args.q_low,
+                'q_high': args.q_high
             },
             'features': FEATURE_ORDER[:X.shape[1]],
             'timestamp': timestamp,
