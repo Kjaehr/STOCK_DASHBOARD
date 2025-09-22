@@ -61,7 +61,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential
+          sudo apt-get install -y build-essential jq
 
       - name: Install Python dependencies
         env:
@@ -99,11 +99,23 @@ jobs:
       - name: Upload model to Supabase Storage
         run: |
           set -euo pipefail
-          MODEL_FILE=$(ls -1 ml_out/model_*.json | head -n1)
-          if [ -z "$MODEL_FILE" ]; then echo "Model file not found"; exit 1; fi
-          MODEL_BASENAME=$(basename "$MODEL_FILE")
+          LATEST_FILE="ml_out/latest.json"
+          if [ ! -f "$LATEST_FILE" ]; then echo "latest.json missing"; exit 1; fi
+
+          # Extract the model path from latest.json
+          MODEL_PATH=$(jq -r '.path' "$LATEST_FILE")
+          MODEL_BASENAME=$(basename "$MODEL_PATH")
+          MODEL_FILE="ml_out/${MODEL_BASENAME}"
+
+          if [ ! -f "$MODEL_FILE" ]; then
+            echo "Model file not found: $MODEL_FILE"
+            echo "Available files:"
+            ls -la ml_out/
+            exit 1
+          fi
+
           DEST_PATH="ml/models/${MODEL_BASENAME}"
-          
+
           echo "Uploading $MODEL_FILE to $DEST_PATH"
           curl -sS -X POST \
             "${SUPABASE_URL%/}/storage/v1/object/${SUPABASE_BUCKET}/${DEST_PATH}" \
@@ -112,9 +124,9 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @"${MODEL_FILE}" \
             -o /dev/null -w '%{http_code}' | tee /tmp/upcode
-          
+
           code=$(cat /tmp/upcode)
-          if [ "$code" != "200" ] && [ "$code" != "201" ]; then 
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
             echo "Upload failed with code: $code"
             exit 1
           fi
