@@ -22,6 +22,8 @@ from io import StringIO
 import os
 import numbers
 
+import shutil
+
 from urllib.parse import quote_plus
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
@@ -2847,23 +2849,36 @@ def main():
                     'label_type': args.label_type,
                 }
                 joblib.dump(artifact, artifact_pkl_path)
+                # Also copy PKL into out_dir for convenience
+                try:
+                    pkl_copy = out_dir / artifact_pkl_path.name
+                    shutil.copyfile(artifact_pkl_path, pkl_copy)
+                    print(f"📁 PKL copied to: {pkl_copy}")
+                except Exception as ce:
+                    print(f"WARN: could not copy PKL to out_dir: {ce}")
             else:
                 print("WARN: joblib not available; skipping .pkl artifact dump")
         except Exception as e:
             print(f"WARN: failed to save model artifact: {e}")
 
-        # Save model metadata
+        # Save model metadata to repo-level models dir
         with open(model_file, 'w') as f:
             json.dump(model_metadata, f, indent=2)
 
-        # Update latest.json
+        # Also write a copy to the run output directory (ml_out) so CI can upload it
+        try:
+            out_copy = out_dir / model_file.name
+            with open(out_copy, 'w') as f:
+                json.dump(model_metadata, f, indent=2)
+        except Exception as e:
+            print(f"WARN: could not write model copy to out_dir: {e}")
+
+        # Update latest.json pointer expected by CI and upload scripts
         latest_file = out_dir / 'latest.json'
         latest_data = {
-            'json': f'ml/models/{model_file.name}',
-            'pkl': f'ml/models/{artifact_pkl_path.name}',
+            'path': f'ml/models/{model_file.name}',
             'version': f'{args.version}_{timestamp}_ensemble'
         }
-
         with open(latest_file, 'w') as f:
             json.dump(latest_data, f, indent=2)
 

@@ -9,11 +9,14 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 shap>=0.44.0
 
+
 # Sentiment analysis
 vaderSentiment>=3.3.0
 
 # Additional utilities
 optuna>=3.4.0  # Hyperparameter optimization
+optuna-integration[xgboost]
+
 plotly>=5.17.0  # Visualization
 seaborn>=0.13.0
 
