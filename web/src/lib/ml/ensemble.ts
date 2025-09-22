@@ -161,7 +161,8 @@ function scoreToProbabilities(score: number, model: EnsembleModel): Record<strin
   const total = Object.values(probabilities).reduce((sum, p) => sum + Math.max(0, p), 0)
   if (total > 0) {
     for (const key in probabilities) {
-      probabilities[key] = Math.max(0, probabilities[key]) / total
+      const typedKey = key as keyof typeof probabilities
+      probabilities[typedKey] = Math.max(0, probabilities[typedKey]) / total
     }
   }
 
