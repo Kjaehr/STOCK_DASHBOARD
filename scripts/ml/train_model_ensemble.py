@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple, Dict, Any, Optional, TYPE_CHECKING, cast, Literal
+from typing import List, Tuple, Dict, Any, Optional, cast, Literal
 import json
 import numpy as np
 import pandas as pd
@@ -93,8 +93,7 @@ except ImportError:
     HAS_OPTUNA = False
     print("Warning: Optuna not installed. Install with: pip install optuna")
 
-if TYPE_CHECKING:
-    from optuna.trial import Trial as OptunaTrial
+from typing import Any as OptunaTrial  # Optuna Trial type alias (avoids hard import for editors)
 
 
 
@@ -529,10 +528,14 @@ class EnsembleTrainer:
                             integ = importlib.import_module('optuna.integration')
                             cb = getattr(integ, 'XGBoostPruningCallback', None)
                             if cb is not None:
-                                fit_kwargs['callbacks'] = [cb(trial, 'validation_0-logloss')]
-                        except Exception:
-                            # XGBoostPruningCallback not available, continue without pruning
-                            pass
+                                try:
+                                    fit_kwargs['callbacks'] = [cb(trial, 'validation_0-logloss')]
+                                except Exception as e:
+                                    print(f"WARN: Pruning callback integration failed for xgboost: {e}. Continuing without pruning.")
+                            else:
+                                print("WARN: XGBoostPruningCallback not found in optuna.integration. Training without pruning.")
+                        except Exception as e:
+                            print(f"WARN: XGBoostPruningCallback import failed: {e}. Training without pruning.")
                         if sample_weight is not None:
                             fit_kwargs['sample_weight'] = sample_weight[train_idx]
                         model.fit(X_tr, y_tr, **fit_kwargs)
@@ -543,6 +546,15 @@ class EnsembleTrainer:
                             fit_kwargs['early_stopping_rounds'] = 50
                         except Exception:
                             pass
+                        # Try to import LightGBMPruningCallback to log availability
+                        try:
+                            import importlib
+                            integ = importlib.import_module('optuna.integration')
+                            lgb_cb = getattr(integ, 'LightGBMPruningCallback', None)
+                            if lgb_cb is None:
+                                print("WARN: LightGBMPruningCallback not found in optuna.integration. Training without pruning.")
+                        except Exception as e:
+                            print(f"WARN: LightGBMPruningCallback import failed: {e}. Training without pruning.")
                         if sample_weight is not None:
                             fit_kwargs['sample_weight'] = sample_weight[train_idx]
                         model.fit(X_tr, y_tr, **fit_kwargs)
@@ -674,7 +686,8 @@ class EnsembleTrainer:
                         calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
                     else:
                         calibrated_model.fit(X_scaled, y)
-                except TypeError:
+                except Exception as e:
+                    print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(tuned_model).__name__}): {e}. Falling back to unweighted training.")
                     calibrated_model.fit(X_scaled, y)
                 tuned_models.append((name, calibrated_model))
                 self.models[name] = calibrated_model
@@ -696,7 +709,8 @@ class EnsembleTrainer:
                         calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
                     else:
                         calibrated_model.fit(X_scaled, y)
-                except TypeError:
+                except Exception as e:
+                    print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(model).__name__}): {e}. Falling back to unweighted training.")
                     calibrated_model.fit(X_scaled, y)
                 tuned_models.append((name, calibrated_model))
                 self.models[name] = calibrated_model
@@ -741,7 +755,8 @@ class EnsembleTrainer:
                         calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
                     else:
                         calibrated_model.fit(X_scaled, y)
-                except TypeError:
+                except Exception as e:
+                    print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(tuned_model).__name__}): {e}. Falling back to unweighted training.")
                     calibrated_model.fit(X_scaled, y)
                 self.models[name] = calibrated_model
                 tuned_models.append((name, calibrated_model))
@@ -761,7 +776,8 @@ class EnsembleTrainer:
                         calibrated_model.fit(X_scaled, y, sample_weight=sample_weight)
                     else:
                         calibrated_model.fit(X_scaled, y)
-                except TypeError:
+                except Exception as e:
+                    print(f"WARN: CalibratedClassifierCV with sample_weight failed for {name} ({type(model).__name__}): {e}. Falling back to unweighted training.")
                     calibrated_model.fit(X_scaled, y)
                 self.models[name] = calibrated_model
                 tuned_models.append((name, calibrated_model))
@@ -978,6 +994,7 @@ class EnsembleTrainer:
         horizon: int = 20,
         out_dir: Optional[Path] = None,
         ret_fwd: Optional[np.ndarray] = None,
+        feature_names: Optional[List[str]] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         """Train and evaluate with 'simple' or 'purged' validation.
         Returns (model, results) where results contains train/test metrics and importance.
@@ -1010,8 +1027,8 @@ class EnsembleTrainer:
             train_metrics = self.evaluate_model(model, X_train, y_train_orig, "Training Set")
             test_metrics = self.evaluate_model(model, X_test, y_test_orig, "Test Set")
 
-            feature_names = FEATURE_ORDER[:X.shape[1]]
-            importance = self.calculate_feature_importance(X_train, feature_names)
+            fnames = feature_names if feature_names is not None else FEATURE_ORDER[:X.shape[1]]
+            importance = self.calculate_feature_importance(X_train, fnames)
 
             results: Dict[str, Any] = {
                 'train_metrics': train_metrics,
@@ -1033,6 +1050,8 @@ class EnsembleTrainer:
 
         fold_metrics: List[Dict[str, Any]] = []
         last_model: Any = None
+        oof_parts: List[pd.DataFrame] = []
+        fold_idx = 0
 
         for test_dates in date_chunks:
             if len(test_dates) == 0:
@@ -1045,8 +1064,8 @@ class EnsembleTrainer:
 
             test_mask = (date_ser >= test_start) & (date_ser <= test_end)
             train_mask = _pd.Series(True, index=date_ser.index)
-            if tickers is not None and len(tickers) == len(date_ser):
-                tick_ser = _pd.Series(tickers)
+            tick_ser = _pd.Series(tickers) if tickers is not None and len(tickers) == len(date_ser) else None
+            if tick_ser is not None:
                 for t in tick_ser[test_mask].unique():
                     t_mask = (tick_ser == t)
                     mask_embargo = t_mask & (date_ser >= emb_left) & (date_ser <= emb_right)
@@ -1068,6 +1087,50 @@ class EnsembleTrainer:
             last_model = model_i
             m = self.evaluate_model(model_i, X_test, y_test_orig, "Purged Fold")
             fold_metrics.append(m)
+
+            # Collect out-of-fold predictions with adaptive probability columns
+            try:
+                if hasattr(model_i, 'predict_proba') and out_dir is not None:
+                    X_test_scaled = self.scaler.transform(X_test)
+                    y_proba = model_i.predict_proba(X_test_scaled)
+                    classes_model = getattr(model_i, 'classes_', None)
+                    if classes_model is not None and hasattr(self.label_encoder, 'inverse_transform'):
+                        try:
+                            class_labels = self.label_encoder.inverse_transform(np.array(classes_model, dtype=int))
+                        except Exception:
+                            class_labels = np.array(classes_model)
+                    else:
+                        yp = np.asarray(y_proba)
+                        n_classes = yp.shape[1] if yp.ndim >= 2 else (len(getattr(model_i, 'classes_', [])) or 2)
+                        class_labels = np.arange(n_classes)
+
+                    # Build probability columns matching actual classes
+                    def _sanitize(lbl: Any) -> str:
+                        s = str(lbl).lower()
+                        s = re.sub(r'[^a-z0-9]+', '_', s).strip('_')
+                        return f'p_{s}'
+
+                    proba_cols = [_sanitize(lbl) for lbl in class_labels]
+                    df_fold = pd.DataFrame(y_proba, columns=proba_cols)
+                    df_fold['y_true'] = list(y_test_orig)
+                    if ret_fwd is not None and len(ret_fwd) == len(y):
+                        df_fold['ret_fwd'] = list(ret_fwd[mask_test])
+                    # Add identifiers
+                    df_fold['date'] = list(date_ser[mask_test].astype('datetime64[ns]'))
+                    if tick_ser is not None:
+                        df_fold['ticker'] = list(tick_ser[mask_test])
+                    df_fold['fold'] = int(fold_idx + 1)
+
+                    # Save per-fold OOF and accumulate
+                    try:
+                        df_fold.to_csv(Path(out_dir) / f'fold_{fold_idx + 1}_oof.csv', index=False)
+                    except Exception:
+                        pass
+                    oof_parts.append(df_fold)
+            except Exception as e:
+                print(f"WARN: OOF collection failed on fold {fold_idx + 1}: {e}")
+            finally:
+                fold_idx += 1
 
         def avg_dict(dicts: List[Dict[str, Any]]) -> Dict[str, float]:
             if not dicts:
@@ -1092,414 +1155,30 @@ class EnsembleTrainer:
             'n_splits': n_splits,
             'embargo_days': embargo_days,
         }
-        return last_model, results
 
-
-        """Train ensemble and evaluate.
-        validation: 'simple' (time split) or 'purged' (purged K-fold walk-forward with embargo)
-        horizon: prediction horizon in days for horizon-adjusted purging
-        """
-        # Encode labels to numeric values for model compatibility
-        y_encoded = self.label_encoder.fit_transform(y)
-
-        # Helper to build sample weights for imbalance (multiclass-safe via inverse freq)
-        def make_sample_weight(y_enc: np.ndarray) -> Optional[np.ndarray]:
+        # Save aggregated OOF and compute adaptive thresholds if available
+        if out_dir is not None and oof_parts:
             try:
-                classes = np.unique(y_enc)
-                cw = compute_class_weight(class_weight='balanced', classes=classes, y=y_enc)
-                class_to_w = {c: w for c, w in zip(classes, cw)}
-                return np.asarray([class_to_w[v] for v in y_enc], dtype=float)
-            except Exception:
-                return None
-
-        # Simple time split baseline
-        if validation != 'purged' or dates is None:
-            split_idx = int(len(X) * (1 - test_size))
-            X_train, X_test = X[:split_idx], X[split_idx:]
-            y_train, y_test = y_encoded[:split_idx], y_encoded[split_idx:]
-            y_train_orig, y_test_orig = y[:split_idx], y[split_idx:]
-
-            print(f"Training set: {len(X_train)} samples")
-            print(f"Test set: {len(X_test)} samples")
-            print(f"Label classes: {list(self.label_encoder.classes_)}")
-
-            sw = make_sample_weight(y_train)
-            model = self.train_model(X_train, y_train, sample_weight=sw)
-
-            train_metrics = self.evaluate_model(model, X_train, y_train_orig, "Training Set")
-            test_metrics = self.evaluate_model(model, X_test, y_test_orig, "Test Set")
-
-            # Decision-rule metrics on test set (OOF-like)
-            try:
-                if ret_fwd is not None and len(ret_fwd) == len(y_encoded):
-                    X_test_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
-                    proba = None
-                    try:
-                        proba = model.predict_proba(X_test_scaled)
-                    except Exception:
-                        proba = None
-                    if proba is not None:
-                        le_classes = np.array(getattr(self.label_encoder, 'classes_', []))
-                        model_classes = np.array(getattr(model, 'classes_', []))
-                        def col_for(label: str):
-                            if label in le_classes and model_classes.size > 0:
-                                enc_val = np.where(le_classes == label)[0]
-                                if enc_val.size > 0:
-                                    enc_val = int(enc_val[0])
-                                    idx = np.where(model_classes == enc_val)[0]
-                                    if idx.size > 0:
-                                        return int(idx[0])
-                            return None
-                        idx_down = col_for('DOWN'); idx_flat = col_for('FLAT'); idx_up = col_for('UP')
-                        n = len(X_test)
-                        p_down = proba[:, idx_down] if idx_down is not None else np.full(n, np.nan)
-                        p_flat = proba[:, idx_flat] if idx_flat is not None else np.full(n, np.nan)
-                        p_up = proba[:, idx_up] if idx_up is not None else np.full(n, np.nan)
-                        ret_test = np.asarray(ret_fwd)[split_idx:]
-                        oof_like = pd.DataFrame({'ret_fwd': ret_test, 'p_down': p_down, 'p_flat': p_flat, 'p_up': p_up})
-                        thr = find_thresholds_from_oof(oof_like, fee_bp=5)
-                        m_rule = compute_trade_metrics(oof_like, thr.get('tau', 0.1), thr.get('kappa', 0.6), fee_bp=5)
-                        print(f"Decision-rule Test Utility: {m_rule['utility']:.4f} | Hit Rate: {m_rule['hit_rate']*100:.2f}% | Trade Rate: {m_rule['trade_rate']*100:.2f}% | Avg/Trade: {m_rule['avg_return_per_trade']:.4f}")
-                        test_metrics.update({'utility': float(m_rule['utility']), 'hit_rate': float(m_rule['hit_rate']), 'trade_rate': float(m_rule['trade_rate']), 'avg_return_per_trade': float(m_rule['avg_return_per_trade'])})
-                        # Duplicate hyphenated keys for JSON compatibility
-                        test_metrics['hit-rate'] = float(m_rule['hit_rate'])
-                        test_metrics['trade-rate'] = float(m_rule['trade_rate'])
-
-            except Exception as e:
-                print(f"WARN: could not compute decision-rule test metrics: {e}")
-
-            # Save per-class metrics for simple validation
-            try:
-                if out_dir is not None and 'per_class' in test_metrics:
-                    (out_dir).mkdir(parents=True, exist_ok=True)
-                    with open(out_dir / 'test_per_class.json', 'w') as f:
-                        json.dump(test_metrics['per_class'], f)
-                    print(f"Saved per-class test metrics to {out_dir / 'test_per_class.json'}")
-            except Exception as e:
-                print(f"WARN: could not save test_per_class.json (simple): {e}")
-
-
-            feature_names = FEATURE_ORDER[:X.shape[1]]
-            importance = self.calculate_feature_importance(X_train, feature_names)
-
-            results = {
-                'train_metrics': train_metrics,
-                'test_metrics': test_metrics,
-                'feature_importance': importance,
-                'model': model,
-                'label_encoder': self.label_encoder
-            }
-            return model, results
-
-        # Purged walk-forward evaluation with embargo
-        import pandas as _pd
-        date_ser = _pd.to_datetime(_pd.Series(dates))
-        uniq_dates = sorted(date_ser.dropna().unique())
-        if len(uniq_dates) < n_splits + 1:
-            n_splits = max(1, min(2, len(uniq_dates) - 1))
-        date_chunks = np.array_split(np.asarray(uniq_dates), n_splits)
-
-
-        start_time = time.time()
-
-        fold_metrics: List[Dict[str, float]] = []
-        last_model: Any = None
-        perm_importances_folds: List[np.ndarray] = []
-
-        for i, test_dates in enumerate(date_chunks):
-            if len(test_dates) == 0:
-                continue
-            test_start = test_dates[0]
-            test_end = test_dates[-1]
-            horizon_days = int(horizon)
-            # Horizon-adjusted purging: extend left embargo by horizon
-            emb_left = test_start - _pd.Timedelta(days=int(embargo_days + horizon_days))
-            emb_right = test_end + _pd.Timedelta(days=int(embargo_days))
-
-            test_mask = (date_ser >= test_start) & (date_ser <= test_end)
-            # Per-ticker embargo purging (group-aware); fallback to global if tickers missing
-            train_mask = _pd.Series(True, index=date_ser.index)
-            if tickers is not None and len(tickers) == len(date_ser):
-                tick_ser = _pd.Series(tickers)
-                # For each ticker appearing in test fold, embargo around its test window
-                for t in tick_ser[test_mask].unique():
-                    t_mask = (tick_ser == t)
-                    # Embargo window same for the fold's date span (with horizon-adjusted left)
-                    mask_embargo = t_mask & (date_ser >= emb_left) & (date_ser <= emb_right)
-                    train_mask[mask_embargo] = False
-            else:
-                # Global embargo if tickers not provided
-                train_mask = (date_ser < emb_left) | (date_ser > emb_right)
-
-            # Validation: ensure no training sample's horizon window overlaps test period
-            overlap_mask = (date_ser >= (test_start - _pd.Timedelta(days=horizon_days))) & (date_ser <= test_end)
-            violations = int((train_mask & overlap_mask).sum())
-            if violations > 0:
-                print(f"WARN: Fold {i+1} purging overlap violations removed: {violations}")
-
-            X_train, X_test = X[train_mask.values], X[test_mask.values]
-            y_train_enc, y_test_enc = y_encoded[train_mask.values], y_encoded[test_mask.values]
-            y_train_orig, y_test_orig = y[train_mask.values], y[test_mask.values]
-
-            if len(X_train) < 50 or len(X_test) < 10:
-                print(f"Fold {i+1}: insufficient samples (train {len(X_train)}, test {len(X_test)}); skipping")
-                continue
-
-            elapsed = time.time() - start_time
-            avg = elapsed / max(1, i)
-            eta = avg * (n_splits - i)
-            print(f"Fold {i+1}/{n_splits}: train={len(X_train)}, test={len(X_test)} (embargo={embargo_days}d) | ETA ~{eta:.1f}s")
-            sw = make_sample_weight(y_train_enc)
-            model_i = self.train_model(X_train, y_train_enc, sample_weight=sw)
-            last_model = model_i
-            # Checkpoint model per fold
-            try:
-                if out_dir is not None and HAS_JOBLIB:
-                    (out_dir).mkdir(parents=True, exist_ok=True)
-                    joblib.dump(model_i, out_dir / f"fold_{i+1}_model.pkl")
-            except Exception as e:
-                print(f"WARN: could not checkpoint fold model: {e}")
-
-            m = self.evaluate_model(model_i, X_test, y_test_orig, f"Purged Fold {i+1}")
-            # Save out-of-fold (OOF) predictions for threshold optimization
-            try:
-                if out_dir is not None:
-                    X_test_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
-                    proba = None
-                    try:
-                        proba = model_i.predict_proba(X_test_scaled)
-                    except Exception:
-                        proba = None
-                    if proba is not None:
-                        import numpy as _np
-                        # Map probabilities to DOWN/FLAT/UP columns based on label encoder mapping
-                        le_classes = _np.array(getattr(self.label_encoder, 'classes_', []))
-                        model_classes = _np.array(getattr(model_i, 'classes_', []))
-                        def col_for(label: str):
-                            if label in le_classes and model_classes.size > 0:
-                                enc_val = _np.where(le_classes == label)[0]
-                                if enc_val.size > 0:
-                                    enc_val = int(enc_val[0])
-                                    idx = _np.where(model_classes == enc_val)[0]
-                                    if idx.size > 0:
-                                        return int(idx[0])
-                            return None
-                        idx_down = col_for('DOWN')
-                        idx_flat = col_for('FLAT')
-                        idx_up = col_for('UP')
-                        n = len(X_test)
-                        p_down = proba[:, idx_down] if idx_down is not None else _np.full(n, _np.nan)
-                        p_flat = proba[:, idx_flat] if idx_flat is not None else _np.full(n, _np.nan)
-                        p_up = proba[:, idx_up] if idx_up is not None else _np.full(n, _np.nan)
-                        dates_fold = _pd.to_datetime(date_ser[test_mask].values)
-                        if tickers is not None and len(tickers) == len(date_ser):
-                            tickers_fold = _np.asarray(tickers)[test_mask.values]
-                        else:
-                            tickers_fold = _np.array(['NA'] * n)
-                        if ret_fwd is not None and len(ret_fwd) == len(date_ser):
-                            ret_fwd_fold = _np.asarray(ret_fwd)[test_mask.values]
-                        else:
-                            ret_fwd_fold = _np.full(n, _np.nan)
-                        oof_df = _pd.DataFrame({
-                            'date': dates_fold,
-                            'ticker': tickers_fold,
-                            'y_true': _np.asarray(y_test_orig),
-                            'ret_fwd': ret_fwd_fold,
-                            'p_down': p_down,
-                            'p_flat': p_flat,
-                            'p_up': p_up,
-                        })
-                        (out_dir).mkdir(parents=True, exist_ok=True)
-                        oof_path = out_dir / f"fold_{i+1}_oof.csv"
-                        oof_df.to_csv(oof_path, index=False)
-                        print(f"Saved OOF predictions to {oof_path}")
-            except Exception as e:
-                print(f"WARN: could not save OOF predictions for fold {i+1}: {e}")
-
-            # Per-fold permutation importance on validation set
-            try:
-                from sklearn.inspection import permutation_importance
-                # Use the same scaling as predictions
-                X_val_scaled = self.scaler.transform(X_test) if hasattr(self, 'scaler') and self.scaler is not None else X_test
-                # y for scoring should be encoded to match estimator predictions
-                result_pi = permutation_importance(
-                    model_i, X_val_scaled, y_test_enc,
-                    scoring='f1_weighted', n_repeats=10, random_state=42, n_jobs=-1
-                )
-                importances_mean = result_pi.importances_mean
-                # Save per-fold JSON with feature names and scores
+                oof_df_all = pd.concat(oof_parts, ignore_index=True)
+                oof_path = Path(out_dir) / 'oof.csv'
+                oof_df_all.to_csv(oof_path, index=False)
+                # Compute thresholds using adaptive aggregation (works for 3 or 5 classes)
                 try:
-                    if out_dir is not None:
-                        (out_dir).mkdir(parents=True, exist_ok=True)
-                        feature_names_fold = FEATURE_ORDER[:X.shape[1]]
-                        pi_items = [
-                            {'feature': feature_names_fold[j], 'importance': float(importances_mean[j])}
-                            for j in range(len(importances_mean))
-                        ]
-                        with open(out_dir / f"fold_{i+1}_perm_importance.json", 'w') as f:
-                            json.dump(pi_items, f)
-                        print(f"Saved permutation importance for fold {i+1} -> {out_dir / f'fold_{i+1}_perm_importance.json'}")
+                    thr = find_thresholds_from_oof(oof_df_all)
+                    results['oof_thresholds'] = thr
+                    with open(Path(out_dir) / 'oof_thresholds.json', 'w') as f:
+                        json.dump(thr, f, indent=2)
                 except Exception as e:
-                    print(f"WARN: could not save permutation importance for fold {i+1}: {e}")
-                # Keep for aggregation
-                perm_importances_folds.append(importances_mean)
+                    print(f"WARN: threshold search on OOF failed: {e}")
             except Exception as e:
-                print(f"WARN: permutation importance failed for fold {i+1}: {e}")
+                print(f"WARN: could not save aggregated OOF: {e}")
 
-
-                # Keep for aggregation
-                perm_importances_folds.append(importances_mean)
-            except Exception as e:
-                print(f"WARN: permutation importance failed for fold {i+1}: {e}")
-
-            fold_metrics.append(m)
-            # Save per-fold metrics
-            try:
-                if out_dir is not None:
-                    (out_dir).mkdir(parents=True, exist_ok=True)
-                    # Confusion matrix
-                    if 'confusion_matrix' in m:
-                        cm_path = out_dir / f"fold_{i+1}_confusion.csv"
-                        np.savetxt(cm_path, np.array(m['confusion_matrix'], dtype=int), delimiter=",", fmt="%d")
-                    # Per-class report
-                    if 'per_class' in m:
-                        pc_path = out_dir / f"fold_{i+1}_per_class.json"
-                        with open(pc_path, 'w') as f:
-                            json.dump(m['per_class'], f)
-            except Exception as e:
-                print(f"WARN: could not save per-fold metrics: {e}")
-
-        # Aggregate metrics across folds
-        def avg_dict(dicts: List[Dict[str, float]]) -> Dict[str, float]:
-            if not dicts:
-                return {'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0, 'auc': 0.0}
-            keys = dicts[0].keys()
-            return {k: float(np.mean([d.get(k, 0.0) for d in dicts])) for k in keys}
-
-        test_metrics = avg_dict(fold_metrics)
-        importance = {}
-        # Aggregate permutation importance across folds
-        try:
-            if perm_importances_folds:
-                agg_arr = np.vstack(perm_importances_folds)
-                mean_imp = agg_arr.mean(axis=0)
-                std_imp = agg_arr.std(axis=0)
-                features_agg = FEATURE_ORDER[:X.shape[1]]
-                agg_items = [
-                    {'feature': features_agg[j],
-                     'importance_mean': float(mean_imp[j]),
-                     'importance_std': float(std_imp[j])}
-                    for j in range(len(mean_imp))
-                ]
-                # Save aggregated JSON
-                if out_dir is not None:
-                    (out_dir).mkdir(parents=True, exist_ok=True)
-                    with open(out_dir / 'perm_importance_avg.json', 'w') as f:
-                        json.dump(agg_items, f)
-                # Console: top-5 features by mean importance
-                top_idx = np.argsort(mean_imp)[::-1][:5]
-                print("Top-5 permutation importance (averaged across purged folds):")
-                for rank, j in enumerate(top_idx, start=1):
-                    print(f"  {rank}. {features_agg[j]}: {mean_imp[j]:.6f}")
-        except Exception as e:
-            print(f"WARN: failed to aggregate permutation importance: {e}")
-
-
-        # After cross-validation: optional threshold optimization from OOF predictions
-        try:
-            if out_dir is not None:
-                import pandas as _pd
-                oof_files = sorted((out_dir).glob("fold_*_oof.csv"))
-                if oof_files:
-                    oof_list = []
-                    for fp in oof_files:
-                        try:
-                            oof_list.append(_pd.read_csv(fp, parse_dates=["date"]))
-                        except Exception as e:
-                            print(f"WARN: could not read {fp}: {e}")
-                    if oof_list:
-                        oof_all = _pd.concat(oof_list, ignore_index=True)
-                        thr = find_thresholds_from_oof(oof_all, fee_bp=5)
-                        # Save thresholds
-                        try:
-                            with open(out_dir / "thresholds.json", "w") as f:
-                                json.dump(thr, f)
-                            print(f"Saved threshold optimization to {out_dir / 'thresholds.json'}")
-                        except Exception as e:
-                            print(f"WARN: could not save thresholds.json: {e}")
-
-                        # Compute and log OOF decision-rule metrics
-                        try:
-                            m_rule = compute_trade_metrics(oof_all, thr.get('tau', 0.1), thr.get('kappa', 0.6), fee_bp=5)
-                            print(f"Decision-rule OOF Utility: {m_rule['utility']:.4f} | Hit Rate: {m_rule['hit_rate']*100:.2f}% | Trade Rate: {m_rule['trade_rate']*100:.2f}% | Avg/Trade: {m_rule['avg_return_per_trade']:.4f}")
-                            test_metrics.update({'utility': float(m_rule['utility']), 'hit_rate': float(m_rule['hit_rate']), 'trade_rate': float(m_rule['trade_rate']), 'avg_return_per_trade': float(m_rule['avg_return_per_trade'])})
-
-                            # Trading summary with optimized thresholds
-                            try:
-                                decisions = apply_decision_rule(oof_all[['p_down', 'p_flat', 'p_up']], thr.get('tau', 0.1), thr.get('kappa', 0.6))
-                                ret = pd.to_numeric(oof_all['ret_fwd'], errors='coerce')
-                                trade_ret = pd.Series(np.where(decisions == 1, ret, np.where(decisions == -1, -ret, np.nan))).dropna()
-                                total_trades = int(len(trade_ret))
-                                win_pct = float((trade_ret > 0).mean()) if total_trades > 0 else 0.0
-                                avg_win_return = float(trade_ret[trade_ret > 0].mean()) if (trade_ret > 0).any() else 0.0
-                                avg_loss_return = float(trade_ret[trade_ret < 0].mean()) if (trade_ret < 0).any() else 0.0
-                                expected_return_per_trade = float(trade_ret.mean()) if total_trades > 0 else 0.0
-                                expected_return_total = float(trade_ret.sum()) if total_trades > 0 else 0.0
-                                # Update and print
-                                test_metrics.update({
-                                    'expected_return_per_trade': expected_return_per_trade,
-                                    'expected_return_total': expected_return_total,
-                                    'total_trades': total_trades,
-                                    'win_pct': win_pct,
-                                    'avg_win_return': avg_win_return,
-                                    'avg_loss_return': avg_loss_return,
-                                })
-                                print("Trading summary (OOF, optimized thresholds):")
-                                print(f"  Trades: {total_trades} | Win %: {win_pct*100:.2f}% | Avg win: {avg_win_return:.5f} | Avg loss: {avg_loss_return:.5f} | Exp/Trade: {expected_return_per_trade:.5f}")
-                            except Exception as e:
-                                print(f"WARN: could not compute trading summary: {e}")
-
-                            # OOF per-class classification metrics and save
-                            try:
-                                # Pred label = argmax among DOWN/FLAT/UP
-                                prob_mat = np.vstack([oof_all['p_down'].values, oof_all['p_flat'].values, oof_all['p_up'].values]).T
-                                idx = np.nanargmax(prob_mat, axis=1)
-                                label_map = np.array(['DOWN', 'FLAT', 'UP'])
-                                y_pred_oof = label_map[idx]
-                                from sklearn.metrics import classification_report
-                                report_dict = classification_report(oof_all['y_true'].values, y_pred_oof, output_dict=True, zero_division=0)
-                                if out_dir is not None:
-                                    (out_dir).mkdir(parents=True, exist_ok=True)
-                                    with open(out_dir / 'test_per_class.json', 'w') as f:
-                                        json.dump(report_dict, f)
-                                    print(f"Saved OOF per-class metrics to {out_dir / 'test_per_class.json'}")
-                            except Exception as e:
-                                print(f"WARN: could not save OOF per-class metrics: {e}")
-
-                            # Duplicate hyphenated keys for JSON compatibility
-                            test_metrics['hit-rate'] = float(m_rule['hit_rate'])
-                            test_metrics['trade-rate'] = float(m_rule['trade_rate'])
-                        except Exception as e:
-                            print(f"WARN: could not compute decision-rule OOF metrics: {e}")
-                        except Exception as e:
-                            print(f"WARN: could not compute decision-rule OOF metrics: {e}")
-
-        except Exception as e:
-            print(f"WARN: threshold optimization failed: {e}")
-
-        results = {
-            'train_metrics': {},
-            'test_metrics': test_metrics,
-            'feature_importance': importance,
-            'model': last_model,
-            'label_encoder': self.label_encoder,
-            'validation': 'purged',
-            'n_splits': n_splits,
-            'embargo_days': embargo_days
-        }
         return last_model, results
 
-        return ensemble, results
+
+
+
+
 
 def load_tickers_from_file(max_tickers: int = 30) -> List[str]:
     """Load tickers from scripts/tickers.txt"""
@@ -1988,7 +1667,7 @@ def main():
             test_size=0.2, validation=args.validation,
             embargo_days=args.embargo, n_splits=args.n_splits,
             horizon=args.horizon, out_dir=out_dir,
-            ret_fwd=ret_fwd
+            ret_fwd=ret_fwd, feature_names=feature_names
         )
 
         # Optional experiment tracking
@@ -2166,44 +1845,87 @@ def main():
 
 # --- Decision rule and utility metrics helpers ---
 
+
+
+def _canonicalize_tri_proba(proba_df: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame with columns p_down, p_flat, p_up derived from input.
+    Supports:
+    - trinary input with columns: p_down, p_flat, p_up
+    - 5-class input with columns: p_strong_down, p_weak_down, p_sideways, p_weak_up, p_strong_up
+    - binary input with columns: p_down, p_up (p_flat inferred)
+    Raises ValueError if required columns are missing.
+    """
+    df = proba_df.copy()
+    lower_to_orig = {c.lower(): c for c in df.columns}
+
+    def has_cols(cols: List[str]) -> bool:
+        return all(col in lower_to_orig for col in cols)
+
+    # Already trinary
+    if has_cols(['p_down', 'p_flat', 'p_up']):
+        cols = [lower_to_orig['p_down'], lower_to_orig['p_flat'], lower_to_orig['p_up']]
+        return pd.DataFrame({
+            'p_down': pd.to_numeric(df[cols[0]], errors='coerce'),
+            'p_flat': pd.to_numeric(df[cols[1]], errors='coerce'),
+            'p_up': pd.to_numeric(df[cols[2]], errors='coerce'),
+        }, index=df.index)
+
+    # 5-class multiclass
+    if has_cols(['p_strong_down', 'p_weak_down', 'p_sideways', 'p_weak_up', 'p_strong_up']):
+        sd = pd.to_numeric(df[lower_to_orig['p_strong_down']], errors='coerce')
+        wd = pd.to_numeric(df[lower_to_orig['p_weak_down']], errors='coerce')
+        sw = pd.to_numeric(df[lower_to_orig['p_sideways']], errors='coerce')
+        wu = pd.to_numeric(df[lower_to_orig['p_weak_up']], errors='coerce')
+        su = pd.to_numeric(df[lower_to_orig['p_strong_up']], errors='coerce')
+        return pd.DataFrame({
+            'p_down': (sd + wd).clip(lower=0.0, upper=1.0),
+            'p_flat': sw.clip(lower=0.0, upper=1.0),
+            'p_up': (wu + su).clip(lower=0.0, upper=1.0),
+        }, index=df.index)
+
+    # Binary
+    if has_cols(['p_down', 'p_up']):
+        pdn = pd.to_numeric(df[lower_to_orig['p_down']], errors='coerce')
+        pup = pd.to_numeric(df[lower_to_orig['p_up']], errors='coerce')
+        pflat = (1.0 - np.maximum(pdn.fillna(0.0), pup.fillna(0.0))).clip(lower=0.0, upper=1.0)
+        return pd.DataFrame({'p_down': pdn, 'p_flat': pflat, 'p_up': pup}, index=df.index)
+
+    raise ValueError("Unsupported probability columns. Provide trinary (p_down,p_flat,p_up) or 5-class (p_strong_down,p_weak_down,p_sideways,p_weak_up,p_strong_up) or binary (p_down,p_up).")
+
 def apply_decision_rule(proba_df: pd.DataFrame, tau: float, kappa: float) -> pd.Series:
     """Apply no-trade decision rule on probability DataFrame.
+    Works for trinary or 5-class inputs by aggregating to DOWN/FLAT/UP buckets.
     Trade when (p_up - p_down) >= tau AND max_prob >= kappa (BUY),
     or (p_down - p_up) >= tau AND max_prob >= kappa (SELL). Else 0 (no trade).
     Returns a pd.Series with values {+1: BUY, -1: SELL, 0: NO-TRADE}.
-    Expects columns: p_down, p_flat, p_up
     """
-    df = proba_df.copy()
-    for c in ['p_down', 'p_flat', 'p_up']:
-        if c not in df.columns:
-            raise ValueError(f"Missing required column: {c}")
-    p_up = pd.to_numeric(df['p_up'], errors='coerce')
-    p_down = pd.to_numeric(df['p_down'], errors='coerce')
-    max_prob = df[['p_down', 'p_flat', 'p_up']].max(axis=1)
+    tri = _canonicalize_tri_proba(proba_df)
+    p_up = pd.to_numeric(tri['p_up'], errors='coerce')
+    p_down = pd.to_numeric(tri['p_down'], errors='coerce')
+    max_prob = tri[['p_down', 'p_flat', 'p_up']].max(axis=1)
     buy = ((p_up - p_down) >= float(tau)) & (max_prob >= float(kappa))
     sell = ((p_down - p_up) >= float(tau)) & (max_prob >= float(kappa))
     decisions = np.where(buy, 1, np.where(sell, -1, 0))
-    return pd.Series(decisions, index=df.index, name='decision')
+    return pd.Series(decisions, index=tri.index, name='decision')
 
 
 def compute_trade_metrics(proba_df: pd.DataFrame, tau: float, kappa: float, fee_bp: int = 5) -> Dict[str, float]:
     """Compute utility, hit rate, trade rate, and avg return per trade using decision rule.
-    Expects columns: ret_fwd, p_down, p_flat, p_up.
-    Utility is mean(trade_ret) - fee_bp/10000.
+    Accepts either trinary or 5-class probability columns; aggregates as needed.
+    Requires a 'ret_fwd' column for forward returns.
+    Utility = mean(trade_ret) - fee_bp/10000.
     """
     df = proba_df.copy()
-    required = ['ret_fwd', 'p_down', 'p_flat', 'p_up']
-    for c in required:
-        if c not in df.columns:
-            raise ValueError(f"Missing required column: {c}")
-    # Sanitize numeric columns
-    for c in required:
-        df[c] = pd.to_numeric(df[c], errors='coerce').replace([np.inf, -np.inf], np.nan)
-    sig = apply_decision_rule(df[['p_down', 'p_flat', 'p_up']], tau, kappa)
-    ret = df['ret_fwd']
+    if 'ret_fwd' not in df.columns:
+        raise ValueError("Missing required column: ret_fwd")
+    # Canonicalize to trinary buckets for decision calculation
+    tri = _canonicalize_tri_proba(df.drop(columns=[c for c in ['ret_fwd'] if c in df.columns]))
+    tri['ret_fwd'] = pd.to_numeric(df['ret_fwd'], errors='coerce').replace([np.inf, -np.inf], np.nan)
+    sig = apply_decision_rule(tri[['p_down', 'p_flat', 'p_up']], tau, kappa)
+    ret = tri['ret_fwd']
     trade_ret = np.where(sig == 1, ret, np.where(sig == -1, -ret, np.nan))
     trade_ret = pd.Series(trade_ret).dropna()
-    n = int(len(df))
+    n = int(len(tri))
     n_tr = int(len(trade_ret))
     trade_rate = float(n_tr / n) if n > 0 else 0.0
     avg_ret = float(trade_ret.mean()) if n_tr > 0 else 0.0
@@ -2223,29 +1945,26 @@ def compute_trade_metrics(proba_df: pd.DataFrame, tau: float, kappa: float, fee_
 
 def find_thresholds_from_oof(oof_df: pd.DataFrame, fee_bp: int = 5) -> Dict[str, float]:
     """Grid search thresholds (tau, kappa) on OOF predictions to maximize utility.
-    Decision rule: trade when (p_up - p_down) >= tau AND max_prob >= kappa.
-    Expects columns: ret_fwd, p_down, p_flat, p_up
-    Utility = mean(trade_ret) - fee_bp/10000, where trade_ret = ret_fwd for BUY, -ret_fwd for SELL.
+    Accepts trinary or 5-class probability columns and a 'ret_fwd' column.
+    Decision rule uses aggregated DOWN/FLAT/UP buckets.
     Returns: { 'tau', 'kappa', 'utility', 'n_trades', 'win_rate', 'trade_rate', 'avg_return_per_trade' }
     """
     df = oof_df.copy()
-    required = ['ret_fwd', 'p_down', 'p_flat', 'p_up']
-    for c in required:
-        if c not in df.columns:
-            raise ValueError(f"Missing required OOF column: {c}")
+    if 'ret_fwd' not in df.columns:
+        raise ValueError("Missing required OOF column: ret_fwd")
+    tri = _canonicalize_tri_proba(df.drop(columns=[c for c in ['ret_fwd'] if c in df.columns]))
+    tri['ret_fwd'] = pd.to_numeric(df['ret_fwd'], errors='coerce').replace([np.inf, -np.inf], np.nan)
+
     taus = [0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     kappas = [0.5, 0.6, 0.7, 0.8, 0.9]
     best = {'tau': None, 'kappa': None, 'utility': -1e9, 'n_trades': 0, 'win_rate': 0.0, 'trade_rate': 0.0, 'avg_return_per_trade': 0.0}
     fee = float(fee_bp) / 10000.0
-    # Sanitize
-    for col in ['ret_fwd', 'p_down', 'p_flat', 'p_up']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').replace([np.inf, -np.inf], np.nan)
-    N = int(len(df))
+
+    N = int(len(tri))
     for tau in taus:
         for kappa in kappas:
-            # Decisions: +1 buy, -1 sell, 0 no-trade
-            sig = apply_decision_rule(df[['p_down', 'p_flat', 'p_up']], tau, kappa)
-            trade_ret = np.where(sig == 1, df['ret_fwd'], np.where(sig == -1, -df['ret_fwd'], np.nan))
+            sig = apply_decision_rule(tri[['p_down', 'p_flat', 'p_up']], tau, kappa)
+            trade_ret = np.where(sig == 1, tri['ret_fwd'], np.where(sig == -1, -tri['ret_fwd'], np.nan))
             trade_ret = pd.Series(trade_ret).dropna()
             if len(trade_ret) == 0:
                 util = -fee
@@ -2258,7 +1977,7 @@ def find_thresholds_from_oof(oof_df: pd.DataFrame, fee_bp: int = 5) -> Dict[str,
                 util = float(avg_ret - fee)
                 n_tr = int(len(trade_ret))
                 win = float((trade_ret > 0).mean())
-                tr_rate = float(n_tr / N) if N > 0 else 0.0
+                tr_rate = float(n_tr / max(1, N))
             if util > best['utility']:
                 best = {
                     'tau': float(tau),
