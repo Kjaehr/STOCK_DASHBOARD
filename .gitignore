@@ -31,3 +31,9 @@ web/var/
 # Env files
 .env
 .env.*
+
+
+# Model artifacts (do not commit binary models)
+ml_out/*.pkl
+ml_out/*.joblib
+ml/models/*.pkl

@@ -605,3 +605,24 @@ Per‑fil TTL: kortere TTL for meta.json, længere for historik; kan sættes i r
 Bedre observability: log upload‑resultater i Actions; i API‑routen log status/hit‑miss (uden at eksponere nøgler).
 Fail‑safe: ved upload‑fejl, behold sidste gyldige JSON (vi proxy’er, så UI fejler ikke hårdt).
 Senere: skift til Supabase Edge Function + Cron for en 100% serverless pipeline uden Actions.
+
+## 18) ML model artifacts → Hugging Face Hub (CI)
+
+- CI uploads the latest ensemble artifacts to a private Hugging Face model repo under: `Kjaehr/stock_dashboard_models` → `ensembles/` subfolder.
+- What is uploaded from `ml_out/` after each training run:
+  - Exactly one `.pkl` (the newest), the matching `.json` metadata copy, `latest.json`, and `oof.csv` (+ per-fold CSVs if present).
+- Authentication: set GitHub Actions secret `HF_API_TOKEN`. No tokens are ever printed.
+- Configuration (env, with defaults):
+  - `HF_HUB_REPO_ID` (default `Kjaehr/stock_dashboard_models`)
+  - `HF_HUB_SUBDIR` (default `ensembles/`)
+  - `UPLOAD_TO_HF` (bool) — default on in CI, off locally. Training script exposes flags; upload is performed by the workflow step.
+- Output pointer (`ml_out/latest.json`) is rewritten post-upload to:
+  - `{ repo_id, path_in_repo, version, uploaded_at }` and points to the uploaded `.pkl` on the Hub.
+- Safety/robustness:
+  - Upload retries (×3 with backoff) per file; fail-fast if `.pkl` > 2GB.
+  - Binary models are never committed: `.gitignore` excludes `ml_out/*.pkl` and `ml/models/*.pkl`.
+- Where to find files:
+  - Repo: https://huggingface.co/Kjaehr/stock_dashboard_models
+  - Files: `.../resolve/main/ensembles/<filename>`
+
+To disable uploads locally, do nothing (default off). To force-enable locally: `UPLOAD_TO_HF=true HF_API_TOKEN=... python scripts/ml/train_model_ensemble.py ...` (not required; CI handles uploads).

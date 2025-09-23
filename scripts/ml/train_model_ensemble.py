@@ -59,6 +59,22 @@ from sklearn.metrics import classification_report, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 import warnings
+# --- HF Hub upload configuration (central) ---
+# Defaults; can be overridden via environment variables
+HF_HUB_REPO_ID = os.getenv('HF_HUB_REPO_ID', 'Kjaehr/stock_dashboard_models')
+HF_HUB_SUBDIR = os.getenv('HF_HUB_SUBDIR', 'ensembles/')
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
+
+# Default: upload in CI, not locally
+UPLOAD_TO_HF = _env_flag('UPLOAD_TO_HF', default=_env_flag('CI', False) or _env_flag('GITHUB_ACTIONS', False))
+# Note: Upload is implemented in the GitHub Actions workflow step; this flag is provided
+# for future programmatic control and documentation.
+
 warnings.filterwarnings('ignore')
 
 xgb = None

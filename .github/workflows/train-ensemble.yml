@@ -29,7 +29,7 @@ on:
       years:
         description: "Years of historical data"
         required: false
-        default: "3"
+        default: "10"
       horizon:
         description: "Prediction horizon (days)"
         required: false
@@ -37,7 +37,7 @@ on:
       max_tickers:
         description: "Max tickers for training"
         required: false
-        default: "10"
+        default: "75"
 
 jobs:
   train-ensemble:
@@ -46,7 +46,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
       SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
           # Install ML libraries with specific versions that work well in CI
           pip install "xgboost>=2.0.0" "lightgbm>=4.0.0" "shap>=0.44.0"
           # Install utility libraries
-          pip install "vaderSentiment>=3.3.0" "optuna>=3.4.0" "plotly>=5.17.0" "seaborn>=0.13.0"
+          pip install "vaderSentiment>=3.3.0" "optuna>=3.4.0" "optuna-integration[xgboost]>=1.0.0" "plotly>=5.17.0" "seaborn>=0.13.0"
           # Verify installations
           python -c "import xgboost, lightgbm, shap, pandas, numpy, sklearn; print('All ML libraries installed successfully')"
 
@@ -137,7 +137,7 @@ jobs:
           set -euo pipefail
           LATEST_FILE="ml_out/latest.json"
           if [ ! -f "$LATEST_FILE" ]; then echo "latest.json missing"; exit 1; fi
-          
+
           echo "Uploading latest.json"
           curl -sS -X POST \
             "${SUPABASE_URL%/}/storage/v1/object/${SUPABASE_BUCKET}/ml/models/latest.json" \
@@ -146,13 +146,128 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @"${LATEST_FILE}" \
             -o /dev/null -w '%{http_code}' | tee /tmp/upcode
-          
+
           code=$(cat /tmp/upcode)
-          if [ "$code" != "200" ] && [ "$code" != "201" ]; then 
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
             echo "Latest upload failed with code: $code"
             exit 1
           fi
           echo "Latest upload successful with code: $code"
+
+
+      - name: Upload artifacts to Hugging Face Hub
+        env:
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO_ID="${HF_HUB_REPO_ID:-Kjaehr/stock_dashboard_models}"
+          SUBDIR="${HF_HUB_SUBDIR:-ensembles/}"
+
+          echo "Repo id: ${REPO_ID}"
+          echo "Target subdir: ${SUBDIR}"
+
+          # Find the newest PKL in ml_out
+          PKL_FILE=$(ls -1t ml_out/*.pkl 2>/dev/null | head -n1 || true)
+          if [ -z "${PKL_FILE}" ]; then
+            echo "ERROR: No .pkl found in ml_out/ (expected exactly one, e.g., ensemble_v3_....pkl)" >&2
+            ls -la ml_out/ || true
+            exit 1
+          fi
+
+          # Check size (fail > 2GB)
+          if command -v stat >/dev/null 2>&1; then
+            if stat --version >/dev/null 2>&1; then
+              SIZE=$(stat -c%s "${PKL_FILE}")
+            else
+              SIZE=$(stat -f%z "${PKL_FILE}")
+            fi
+          else
+            SIZE=0
+          fi
+          MAX=$((2*1024*1024*1024))
+          if [ "${SIZE}" -gt "${MAX}" ]; then
+            echo "ERROR: File ${PKL_FILE} is larger than 2GB (${SIZE} bytes). Consider splitting/compressing or alternative storage." >&2
+            exit 1
+          fi
+
+          BASENAME=$(basename "${PKL_FILE}")
+          BASE_NOEXT="${BASENAME%.pkl}"
+          JSON_FILE="ml_out/${BASE_NOEXT}.json"
+          LATEST_FILE="ml_out/latest.json"
+
+          # Optional files
+          OOF_MAIN="ml_out/oof.csv"
+          # Per-fold and any oof variants
+          mapfile -t OOF_FOLDS < <(ls -1 ml_out/*oof*.csv 2>/dev/null || true)
+
+          echo "Preparing to upload to Hugging Face Hub..."
+
+          # Export variables for Python environment
+          export REPO_ID SUBDIR
+          export PKL_FILE="${PKL_FILE}" JSON_FILE="${JSON_FILE}" LATEST_FILE="${LATEST_FILE}"
+          export OOF_MAIN="${OOF_MAIN}"
+          # Join array into space-separated list for Python
+          export OOF_FOLDS="${OOF_FOLDS[*]:-}"
+
+
+
+          python -m pip install --upgrade "huggingface_hub>=0.14.1"
+
+          # Use CLI to avoid YAML heredoc indentation issues
+          export HF_TOKEN="${HF_API_TOKEN}"
+
+          # Ensure repo exists (private)
+          huggingface-cli repo create "${REPO_ID}" --private --type model -y >/dev/null 2>&1 || true
+
+          upload_with_retry() {
+            local src="$1"; local dst="$2"; local attempt
+            for attempt in 1 2 3; do
+              if huggingface-cli upload "${REPO_ID}" "${src}" "${dst}" --repo-type model --private --quiet; then
+                echo "Uploaded: ${dst}"
+                return 0
+              fi
+              sleep $((2**(attempt-1)))
+            done
+            return 1
+          }
+
+          FAILED=0
+          # Required: .pkl
+          if ! upload_with_retry "${PKL_FILE}" "${SUBDIR}${BASENAME}"; then FAILED=1; fi
+          # Optional companions
+          if [ -f "${JSON_FILE}" ]; then upload_with_retry "${JSON_FILE}" "${SUBDIR}${BASE_NOEXT}.json" || FAILED=1; fi
+          if [ -f "${LATEST_FILE}" ]; then upload_with_retry "${LATEST_FILE}" "${SUBDIR}latest.json" || FAILED=1; fi
+          if [ -f "${OOF_MAIN}" ]; then upload_with_retry "${OOF_MAIN}" "${SUBDIR}oof.csv" || FAILED=1; fi
+          if [ ${#OOF_FOLDS[@]:-0} -gt 0 ]; then
+            for f in "${OOF_FOLDS[@]}"; do
+              [ -f "$f" ] && upload_with_retry "$f" "${SUBDIR}$(basename "$f")" || FAILED=1
+            done
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "ERROR: One or more uploads failed" >&2
+            exit 1
+          fi
+
+          # Update ml_out/latest.json to point to Hub
+          VERSION="$(jq -r '.version // empty' "${LATEST_FILE}" 2>/dev/null || true)"
+          if [ -z "${VERSION}" ]; then VERSION="${BASE_NOEXT}"; fi
+          jq -n --arg repo_id "${REPO_ID}" \
+                --arg path_in_repo "${SUBDIR}${BASENAME}" \
+                --arg version "${VERSION}" \
+                --arg uploaded_at "$(date -u +%FT%SZ)" \
+                '{repo_id:$repo_id, path_in_repo:$path_in_repo, version:$version, uploaded_at:$uploaded_at}' \
+            > ml_out/latest.json
+
+          echo "Upload OK"
+          echo "repo_id: ${REPO_ID}"
+          echo "path_in_repo (.pkl): ${SUBDIR}${BASENAME}"
+          echo "Repo: https://huggingface.co/${REPO_ID}"
+          echo "File: https://huggingface.co/${REPO_ID}/resolve/main/${SUBDIR}${BASENAME}"
+          [ -f "${JSON_FILE}" ] && echo "File: https://huggingface.co/${REPO_ID}/resolve/main/${SUBDIR}${BASE_NOEXT}.json"
+          [ -f "${LATEST_FILE}" ] && echo "File: https://huggingface.co/${REPO_ID}/resolve/main/${SUBDIR}latest.json"
+          [ -f "${OOF_MAIN}" ] && echo "File: https://huggingface.co/${REPO_ID}/resolve/main/${SUBDIR}oof.csv"
+
 
       - name: Summary
         run: |

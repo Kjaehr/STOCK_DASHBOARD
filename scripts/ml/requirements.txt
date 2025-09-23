@@ -9,6 +9,8 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 shap>=0.44.0
 
+# Hugging face hub
+huggingface_hub>=0.14.1
 
 # Sentiment analysis
 vaderSentiment>=3.3.0
