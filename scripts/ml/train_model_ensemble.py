@@ -558,6 +558,29 @@ class EnsembleTrainer:
 
         return models
 
+    def _fit_with_sample_weight(self, estimator: Any, X: np.ndarray, y: np.ndarray,
+                                 sample_weight: Optional[np.ndarray] = None, **kwargs) -> Any:
+        """Fit estimator, routing sample_weight correctly for Pipelines.
+        If estimator is a Pipeline, forward weights to its final step as '<last>__sample_weight'.
+        Falls back gracefully if the estimator doesn't accept weights.
+        """
+        if sample_weight is None:
+            return estimator.fit(X, y, **kwargs)
+        try:
+            if isinstance(estimator, Pipeline):
+                try:
+                    last_step = estimator.steps[-1][0]
+                except Exception:
+                    # Fallback to common name
+                    last_step = 'clf'
+                return estimator.fit(X, y, **{**kwargs, f"{last_step}__sample_weight": sample_weight})
+            else:
+                return estimator.fit(X, y, sample_weight=sample_weight, **kwargs)
+        except TypeError:
+            # Retry without weights if unsupported
+            return estimator.fit(X, y, **kwargs)
+
+
     def hyperparameter_tuning(self, X: np.ndarray, y: np.ndarray,
                             model_name: str, model: Any, sample_weight: Optional[np.ndarray] = None) -> Any:
         """Tune hyperparameters using Optuna (if enabled) or GridSearchCV as fallback."""
@@ -775,15 +798,9 @@ class EnsembleTrainer:
                             fit_kwargs['sample_weight'] = sample_weight[train_idx]
                         model.fit(X_tr, y_tr, **fit_kwargs)
                     else:
-                        if sample_weight is not None:
-                            model.fit(X_tr, y_tr, sample_weight=sample_weight[train_idx])
-                        else:
-                            model.fit(X_tr, y_tr)
+                        self._fit_with_sample_weight(model, X_tr, y_tr, sample_weight=sample_weight[train_idx] if sample_weight is not None else None)
                 except TypeError:
-                    if isinstance(model, Pipeline) and sample_weight is not None:
-                        model.fit(X_tr, y_tr, **{'clf__sample_weight': sample_weight[train_idx]})
-                    else:
-                        model.fit(X_tr, y_tr)
+                    self._fit_with_sample_weight(model, X_tr, y_tr, sample_weight=sample_weight[train_idx] if sample_weight is not None else None)
                 scores.append(auc_score(model, X_val, y_val))
             return float(np.mean(scores))
 
@@ -881,18 +898,9 @@ class EnsembleTrainer:
         else:
             best = base_model
         try:
-            if sample_weight is not None:
-                if isinstance(best, Pipeline):
-                    best.fit(X, y, **{'clf__sample_weight': sample_weight})
-                else:
-                    best.fit(X, y, sample_weight=sample_weight)
-            else:
-                best.fit(X, y)
-        except TypeError:
-            if isinstance(best, Pipeline) and sample_weight is not None:
-                best.fit(X, y, **{'clf__sample_weight': sample_weight})
-            else:
-                best.fit(X, y)
+            self._fit_with_sample_weight(best, X, y, sample_weight=sample_weight)
+        except Exception:
+            self._fit_with_sample_weight(best, X, y, sample_weight=None)
         return best
 
     def train_ensemble(self, X: np.ndarray, y: np.ndarray, sample_weight: Optional[np.ndarray] = None) -> VotingClassifier:
@@ -940,12 +948,9 @@ class EnsembleTrainer:
                 print(f"❌ {name} training failed: {e}")
                 # Fallback: fit default model then calibrate
                 try:
-                    if sample_weight is not None:
-                        model.fit(X_proc, y, sample_weight=sample_weight)
-                    else:
-                        model.fit(X_proc, y)
+                    self._fit_with_sample_weight(model, X_proc, y, sample_weight=sample_weight)
                 except Exception:
-                    model.fit(X_proc, y)
+                    self._fit_with_sample_weight(model, X_proc, y, sample_weight=None)
                 print(f"Calibrating {name} (fallback)...")
                 calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
                 try:
@@ -1018,12 +1023,9 @@ class EnsembleTrainer:
             except Exception as e:
                 print(f"{name} tuning failed: {e} — using default")
                 try:
-                    if sample_weight is not None:
-                        model.fit(X_proc, y, sample_weight=sample_weight)
-                    else:
-                        model.fit(X_proc, y)
+                    self._fit_with_sample_weight(model, X_proc, y, sample_weight=sample_weight)
                 except Exception:
-                    model.fit(X_proc, y)
+                    self._fit_with_sample_weight(model, X_proc, y, sample_weight=None)
                 print(f"Calibrating {name} (stacking fallback)...")
                 calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
                 try:
