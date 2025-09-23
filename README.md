@@ -608,21 +608,49 @@ Senere: skift til Supabase Edge Function + Cron for en 100% serverless pipeline 
 
 ## 18) ML model artifacts → Hugging Face Hub (CI)
 
-- CI uploads the latest ensemble artifacts to a private Hugging Face model repo under: `Kjaehr/stock_dashboard_models` → `ensembles/` subfolder.
+- CI uploads the latest ensemble bundle to a private Hugging Face model repo under: `Kjaehr/stock_dashboard_models` → `ensembles/`.
 - What is uploaded from `ml_out/` after each training run:
-  - Exactly one `.pkl` (the newest), the matching `.json` metadata copy, `latest.json`, and `oof.csv` (+ per-fold CSVs if present).
+  - Exactly one `.zip` bundle (`ensemble_<version>_<type>_<label>_<ts>.zip`), the matching `.json` metadata copy, `latest.json`, and `oof.csv` (+ per‑fold CSVs if present).
 - Authentication: set GitHub Actions secret `HF_API_TOKEN`. No tokens are ever printed.
 - Configuration (env, with defaults):
   - `HF_HUB_REPO_ID` (default `Kjaehr/stock_dashboard_models`)
   - `HF_HUB_SUBDIR` (default `ensembles/`)
-  - `UPLOAD_TO_HF` (bool) — default on in CI, off locally. Training script exposes flags; upload is performed by the workflow step.
-- Output pointer (`ml_out/latest.json`) is rewritten post-upload to:
-  - `{ repo_id, path_in_repo, version, uploaded_at }` and points to the uploaded `.pkl` on the Hub.
+- Output pointer (`ml_out/latest.json`) is rewritten post‑upload to:
+  - `{ repo_id, path_in_repo, version, uploaded_at }` and points to the uploaded `.zip` on the Hub.
 - Safety/robustness:
-  - Upload retries (×3 with backoff) per file; fail-fast if `.pkl` > 2GB.
-  - Binary models are never committed: `.gitignore` excludes `ml_out/*.pkl` and `ml/models/*.pkl`.
+  - Upload retries (×3 with backoff) per file;
+  - Size‑aware upload: `< 2GB` → standard `hf upload` (git/LFS‑style); `≥ 2GB` → `huggingface-cli upload` (multi‑part to S3).
+  - Binary bundles are never committed.
 - Where to find files:
   - Repo: https://huggingface.co/Kjaehr/stock_dashboard_models
-  - Files: `.../resolve/main/ensembles/<filename>`
+  - Files: `.../resolve/main/ensembles/<filename>.zip`
 
-To disable uploads locally, do nothing (default off). To force-enable locally: `UPLOAD_TO_HF=true HF_API_TOKEN=... python scripts/ml/train_model_ensemble.py ...` (not required; CI handles uploads).
+To disable uploads locally, do nothing (default off). To force‑enable locally: `UPLOAD_TO_HF=true HF_API_TOKEN=... python scripts/ml/train_model_ensemble.py ...` (not required; CI handles uploads).
+
+### Bundle format (one-file distribution)
+- `<bundle>.zip` contains:
+  - `meta.json` (version, timestamp, model_type, label_type, features, classes, seeds, datahash)
+  - `preproc.joblib` (imputer, scaler, label_encoder)
+  - `model.joblib` (compressed ensemble object)
+  - `thresholds.json` (avg thresholds if available)
+
+This is drop‑in compatible with the existing API usage: you still read the metadata JSON as before; services can download and open the `.zip` when they need the model.
+
+### Health check (service start)
+A simple loader/validator can be used in FastAPI service startup to detect missing/corrupt bundles early:
+
+<augment_code_snippet mode="EXCERPT">
+````python
+import zipfile, json
+
+def bundle_health_ok(path: str) -> bool:
+    try:
+        with zipfile.ZipFile(path) as z:
+            for req in ("meta.json", "preproc.joblib", "model.joblib"):
+                z.getinfo(req)
+            json.loads(z.read("meta.json").decode("utf-8"))
+        return True
+    except Exception:
+        return False
+````
+</augment_code_snippet>

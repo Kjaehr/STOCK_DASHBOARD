@@ -25,6 +25,7 @@ import numbers
 import shutil
 
 from urllib.parse import quote_plus
+import hashlib
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier, StackingClassifier
@@ -2696,9 +2697,12 @@ def main():
         models_dir = repo_root / 'ml' / 'models'
         models_dir.mkdir(parents=True, exist_ok=True)
         base_name = f"{args.version}_{args.model_type}_{args.label_type}_{timestamp}"
-        artifact_pkl_path = models_dir / f"ensemble_{base_name}.pkl"
+        bundle_stem = f"ensemble_{base_name}"
+        bundle_dir = models_dir / f"{bundle_stem}"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle_zip_path = models_dir / f"{bundle_stem}.zip"
         # JSON metadata filename in repo models dir
-        model_file = models_dir / f"ensemble_{base_name}.json"
+        model_file = models_dir / f"{bundle_stem}.json"
 
         # Convert numpy types to native Python types for JSON serialization
         def convert_numpy_types(obj):
@@ -2848,34 +2852,94 @@ def main():
         except Exception:
             pass
 
-        # Dump pickled model artifact for FastAPI inference
+        # Build deploy-friendly bundle (.zip) with preproc + model
         try:
-            if HAS_JOBLIB:
-                assert joblib is not None
-                artifact = {
-                    'model': model,
-                    'imputer': getattr(trainer, 'imputer', None),
-                    'scaler': getattr(trainer, 'scaler', None),
-                    'label_encoder': getattr(trainer, 'label_encoder', None),
-                    'feature_names': feature_names,
-                    'avg_thresholds': results.get('avg_thresholds'),
-                    'timestamp': timestamp,
+            files_in_bundle: List[str] = []
+            # 1) meta.json with versions, classes, seeds, datahash
+            try:
+                classes = []
+                try:
+                    le = getattr(trainer, 'label_encoder', None)
+                    if le is not None and hasattr(le, 'classes_'):
+                        classes = [str(x) for x in list(le.classes_)]
+                except Exception:
+                    classes = []
+                # Simple data hash for traceability (shape + label dist + feature hash)
+                h = hashlib.sha256()
+                h.update(str(X.shape).encode('utf-8'))
+                h.update(json.dumps(label_dist, sort_keys=True).encode('utf-8'))
+                h.update(('|'.join(map(str, feature_names))).encode('utf-8'))
+                data_hash = h.hexdigest()
+                meta = {
                     'version': args.version,
+                    'timestamp': timestamp,
                     'model_type': args.model_type,
                     'label_type': args.label_type,
+                    'features': feature_names,
+                    'classes': classes,
+                    'seeds': {'python': 42, 'numpy': 42},
+                    'datahash': data_hash,
                 }
-                joblib.dump(artifact, artifact_pkl_path)
-                # Also copy PKL into out_dir for convenience
+                with open(bundle_dir / 'meta.json', 'w') as f:
+                    json.dump(meta, f, indent=2)
+                files_in_bundle.append('meta.json')
+            except Exception as e:
+                print(f"WARN: could not write bundle meta.json: {e}")
+            # 2) preproc.joblib (imputer, scaler, label_encoder)
+            try:
+                if HAS_JOBLIB:
+                    assert joblib is not None
+                    preproc = {
+                        'imputer': getattr(trainer, 'imputer', None),
+                        'scaler': getattr(trainer, 'scaler', None),
+                        'label_encoder': getattr(trainer, 'label_encoder', None),
+                    }
+                    joblib.dump(preproc, bundle_dir / 'preproc.joblib', compress=3)
+                    files_in_bundle.append('preproc.joblib')
+            except Exception as e:
+                print(f"WARN: could not dump preproc.joblib: {e}")
+            # 3) thresholds.json (avg thresholds etc.)
+            try:
+                avg_thr = results.get('avg_thresholds') if isinstance(results, dict) else None
+                if avg_thr is not None:
+                    with open(bundle_dir / 'thresholds.json', 'w') as f:
+                        json.dump(convert_numpy_types(avg_thr), f, indent=2)
+                    files_in_bundle.append('thresholds.json')
+            except Exception as e:
+                print(f"WARN: could not write thresholds.json: {e}")
+            # 4) model.joblib (compressed)
+            try:
+                if HAS_JOBLIB:
+                    assert joblib is not None
+                    model_payload = {
+                        'model': model,
+                        'model_type': args.model_type,
+                        'label_type': args.label_type,
+                    }
+                    joblib.dump(model_payload, bundle_dir / 'model.joblib', compress=3)
+                    files_in_bundle.append('model.joblib')
+                else:
+                    print("WARN: joblib not available; skipping model.joblib")
+            except Exception as e:
+                print(f"WARN: could not dump model.joblib: {e}")
+            # 5) Zip the bundle directory
+            try:
+                if bundle_zip_path.exists():
+                    bundle_zip_path.unlink()
+                shutil.make_archive(str(bundle_zip_path.with_suffix('')), 'zip', root_dir=bundle_dir)
+                # Copy zip to out_dir for CI
+                zip_copy = out_dir / bundle_zip_path.name
                 try:
-                    pkl_copy = out_dir / artifact_pkl_path.name
-                    shutil.copyfile(artifact_pkl_path, pkl_copy)
-                    print(f"📁 PKL copied to: {pkl_copy}")
+                    shutil.copyfile(bundle_zip_path, zip_copy)
                 except Exception as ce:
-                    print(f"WARN: could not copy PKL to out_dir: {ce}")
-            else:
-                print("WARN: joblib not available; skipping .pkl artifact dump")
+                    print(f"WARN: could not copy ZIP to out_dir: {ce}")
+                size_bytes = bundle_zip_path.stat().st_size if bundle_zip_path.exists() else 0
+                print(f"📦 Bundle created: {bundle_zip_path} ({size_bytes} bytes)")
+                print(f"📦 Bundle contains: {', '.join(files_in_bundle)}")
+            except Exception as e:
+                print(f"WARN: failed to create bundle zip: {e}")
         except Exception as e:
-            print(f"WARN: failed to save model artifact: {e}")
+            print(f"WARN: failed to build bundle: {e}")
 
         # Save model metadata to repo-level models dir
         with open(model_file, 'w') as f:
@@ -2901,7 +2965,10 @@ def main():
         # Print summary
         print(f"\n🎉 Training completed successfully!")
         print(f"📁 Metadata JSON: {model_file}")
-        print(f"📁 Model PKL:    {artifact_pkl_path}")
+        try:
+            print(f"📦 Bundle ZIP:    {bundle_zip_path} ({bundle_zip_path.stat().st_size} bytes)")
+        except Exception:
+            pass
         print(f"📊 Test Accuracy: {results['test_metrics']['accuracy']:.4f}")
         print(f"📊 Test AUC: {results['test_metrics']['auc']:.4f}")
         print(f"📊 Test F1: {results['test_metrics']['f1_score']:.4f}")
@@ -2978,7 +3045,10 @@ def _canonicalize_tri_proba(proba_df: pd.DataFrame) -> pd.DataFrame:
     if has_cols(['p_down', 'p_up']):
         pdn = pd.to_numeric(df[lower_to_orig['p_down']], errors='coerce')
         pup = pd.to_numeric(df[lower_to_orig['p_up']], errors='coerce')
-        pflat = (1.0 - np.maximum(pdn.fillna(0.0), pup.fillna(0.0))).clip(lower=0.0, upper=1.0)
+        pflat = pd.Series(
+            np.clip(1.0 - np.maximum(pdn.fillna(0.0), pup.fillna(0.0)), 0.0, 1.0),
+            index=df.index
+        )
         return pd.DataFrame({'p_down': pdn, 'p_flat': pflat, 'p_up': pup}, index=df.index)
 
     raise ValueError("Unsupported probability columns. Provide trinary (p_down,p_flat,p_up) or 5-class (p_strong_down,p_weak_down,p_sideways,p_weak_up,p_strong_up) or binary (p_down,p_up).")
