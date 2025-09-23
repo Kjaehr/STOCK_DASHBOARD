@@ -211,18 +211,19 @@ jobs:
 
 
 
-          python -m pip install --upgrade "huggingface_hub>=0.14.1"
+          python -m pip install --upgrade "huggingface_hub>=0.24.0"
 
-          # Use CLI to avoid YAML heredoc indentation issues
+          # Use modern HF CLI and avoid deprecated huggingface-cli
           export HF_TOKEN="${HF_API_TOKEN}"
+          export HUGGINGFACE_HUB_TOKEN="${HF_API_TOKEN}"
 
           # Ensure repo exists (private)
-          huggingface-cli repo create "${REPO_ID}" --private --type model -y >/dev/null 2>&1 || true
+          hf repo create "${REPO_ID}" --private --type model -y >/dev/null 2>&1 || true
 
           upload_with_retry() {
             local src="$1"; local dst="$2"; local attempt
             for attempt in 1 2 3; do
-              if huggingface-cli upload "${REPO_ID}" "${src}" "${dst}" --repo-type model --private --quiet; then
+              if hf upload "${REPO_ID}" "${src}" "${dst}" --repo-type model --private --quiet; then
                 echo "Uploaded: ${dst}"
                 return 0
               fi
@@ -238,11 +239,14 @@ jobs:
           if [ -f "${JSON_FILE}" ]; then upload_with_retry "${JSON_FILE}" "${SUBDIR}${BASE_NOEXT}.json" || FAILED=1; fi
           if [ -f "${LATEST_FILE}" ]; then upload_with_retry "${LATEST_FILE}" "${SUBDIR}latest.json" || FAILED=1; fi
           if [ -f "${OOF_MAIN}" ]; then upload_with_retry "${OOF_MAIN}" "${SUBDIR}oof.csv" || FAILED=1; fi
-          if [ ${#OOF_FOLDS[@]:-0} -gt 0 ]; then
-            for f in "${OOF_FOLDS[@]}"; do
-              [ -f "$f" ] && upload_with_retry "$f" "${SUBDIR}$(basename "$f")" || FAILED=1
-            done
-          fi
+
+          # Upload per-fold oof files (excluding the main oof.csv)
+          shopt -s nullglob
+          for f in ml_out/*oof*.csv; do
+            [ -f "$f" ] || continue
+            [ "$(basename "$f")" = "oof.csv" ] && continue
+            upload_with_retry "$f" "${SUBDIR}$(basename "$f")" || FAILED=1
+          done
 
           if [ "$FAILED" -ne 0 ]; then
             echo "ERROR: One or more uploads failed" >&2
